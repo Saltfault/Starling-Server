@@ -1,8 +1,11 @@
+mod call;
 mod event;
 mod net;
+mod playback;
 mod ui;
+mod voice;
 use crossterm::{
-    event::{self as ct_event, Event, KeyCode},
+    event::{self as ct_event, Event, KeyCode, KeyModifiers},
     execute,
     terminal::*,
 };
@@ -40,6 +43,7 @@ async fn main() -> anyhow::Result<()> {
     execute!(stdout, EnterAlternateScreen)?;
     let mut term = ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(stdout))?;
     let mut app = App::default();
+    let mut playback = playback::Playback::new();
 
     loop {
         term.draw(|f| ui::draw(f, &app))?;
@@ -51,6 +55,7 @@ async fn main() -> anyhow::Result<()> {
                 AppEvent::PeerConnected(_) => app.peers += 1,
                 AppEvent::PeerDisconnected(_) => app.peers = app.peers.saturating_sub(1),
                 AppEvent::Ticket(t) => app.invite = Some(t), // show in header
+                AppEvent::VoiceFrame(bytes) => playback.push_opus(&bytes),
             }
         }
 
@@ -61,6 +66,18 @@ async fn main() -> anyhow::Result<()> {
                     KeyCode::Enter if !app.input.is_empty() => {
                         let text = std::mem::take(&mut app.input);
                         let _ = cmd_tx.send(Command::SendText(text));
+                    }
+                    KeyCode::Char('k') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                        if app.in_call {
+                            let _ = cmd_tx.send(Command::HangUp);
+                            app.in_call = false;
+                        } else if let Some(addr) = app.selected_peer_addr() {
+                            let _ = cmd_tx.send(Command::StartCall(addr));
+                            app.in_call = true;
+                        }
+                    }
+                    KeyCode::Char('m') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                        app.muted = !app.muted; // gate mic_tx.send() on this in start_capture
                     }
                     KeyCode::Char(c) => app.input.push(c),
                     KeyCode::Backspace => {

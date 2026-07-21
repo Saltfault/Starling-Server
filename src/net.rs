@@ -1,5 +1,9 @@
 use crate::event::{AppEvent, ChatMessage, Command};
-use iroh::{Endpoint, EndpointId, endpoint::presets, protocol::Router};
+use iroh::{
+    Endpoint, EndpointId,
+    endpoint::{Connection, presets},
+    protocol::Router,
+};
 use iroh_gossip::{
     api::Event,
     net::{GOSSIP_ALPN, Gossip},
@@ -31,6 +35,12 @@ pub async fn run(
     let gossip = Gossip::builder().spawn(endpoint.clone());
     let _router = Router::builder(endpoint.clone())
         .accept(GOSSIP_ALPN, gossip.clone())
+        .accept(
+            crate::call::VOICE_ALPN,
+            VoiceProto {
+                evt_tx: evt_tx.clone(),
+            },
+        )
         .spawn();
 
     // hand the UI a ticket others cna use to join us
@@ -38,6 +48,9 @@ pub async fn run(
     let _ = evt_tx.send(AppEvent::Ticket(ticket.to_string()));
 
     let (sender, mut receiver) = gossip.subscribe_and_join(topic, bootstrap).await?.split();
+
+    // keep the capture stream alive for the duration of a call
+    let mut _mic_stream: Option<cpal::Stream> = None;
 
     loop {
         tokio::select! {
@@ -53,6 +66,16 @@ pub async fn run(
                     sender.broadcast(bytes.into()).await?;
                     let _ = evt_tx.send(AppEvent::Message(msg));
                 }
+
+                Command::StartCall(addr) => {
+                    let (mic_tx, mic_rx) = mpsc::unbounded_channel();
+                    _mic_stream = Some(crate::voice::start_capture(mic_tx)?);
+                    let ep = endpoint.clone();
+                    tokio::spawn(async move {
+                        let _ = crate::call::place_call(ep, addr, mic_rx).await;
+                    });
+                }
+                Command::HangUp => { _mic_stream = None; }   // dropping stops the mic
 
                 Command::Quit => break,
             },
@@ -78,4 +101,16 @@ pub async fn run(
 
 fn whoami() -> String {
     std::env::var("STARLING_NAME").unwrap_or_else(|_| "anon".into())
+}
+
+#[derive(Debug)]
+struct VoiceProto {
+    evt_tx: mpsc::UnboundedSender<AppEvent>,
+}
+
+impl iroh::protocol::ProtocolHandler for VoiceProto {
+    async fn accept(&self, conn: Connection) -> Result<(), iroh::protocol::AcceptError> {
+        let _ = crate::call::handle_incoming(conn, self.evt_tx.clone()).await;
+        Ok(())
+    }
 }
