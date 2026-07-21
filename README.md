@@ -1,36 +1,128 @@
 # Starling
 
-A minimal voice + text chat app built on [iroh](https://iroh.computer) gossip
-and QUIC. Runs in the terminal, peers discover each other via a shared invite
-ticket, and voice calls are direct peer-to-peer Opus streams.
+A federated peer-to-peer communications platform where peers — known as
+**birds** — can communicate from anywhere in the world thanks to a
+peer-to-peer network called **the murmuration**.
+
+Starling runs in the terminal and provides text chat via gossip protocol
+and voice calls via direct QUIC streams. Birds discover each other through
+the murmuration using iroh's relay and discovery infrastructure — no central
+server required. An invite ticket is all a new bird needs to join a flock.
 
 ## Quick start
 
-```bash
-just install-deps    # one-time: installs system packages
-just run             # build + run, starts a new session
-```
-
-Share the invite ticket (shown in the header) with a friend. They join with:
+Once you have [Rust](#installing-rust) and [system dependencies](#system-dependencies)
+installed:
 
 ```bash
-just join <ticket>
+just run             # start a new session (you are the flock opener)
 ```
 
-Or without `just`:
+Share the invite ticket (shown in the header) with another bird. They join with:
 
 ```bash
-cargo run -- open        # start a session
-cargo run -- join <ticket>   # join an existing session
+just join <ticket>   # join an existing flock
 ```
 
-Set your display name with the `STARLING_NAME` environment variable:
+Set your display name (shown next to your messages) with:
 
 ```bash
 STARLING_NAME=Alice just run
 ```
 
-## Prerequisites
+Or without `just`:
+
+```bash
+cargo run -- open            # start a new session
+cargo run -- join <ticket>   # join an existing session
+```
+
+---
+
+## Installing Rust
+
+Starling requires the Rust toolchain (compiler + cargo). Install it with
+**rustup**, the official Rust installer.
+
+### Linux / WSL2
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"    # or restart your shell
+```
+
+Verify the installation:
+
+```bash
+rustc --version
+cargo --version
+```
+
+### macOS
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"
+```
+
+Or if you use [Homebrew](https://brew.sh):
+
+```bash
+brew install rustup-init
+rustup-init
+```
+
+### Windows
+
+Download and run [rustup-init.exe](https://win.rustup.rs/x86_64) from the
+official site, or use PowerShell:
+
+```powershell
+winget install Rustlang.Rustup
+```
+
+This installs the MSVC toolchain target by default. You'll also need the
+Visual Studio C++ Build Tools — see [System dependencies → Windows](#windows-1)
+below.
+
+Verify the installation:
+
+```powershell
+rustc --version
+cargo --version
+```
+
+### Installing `just`
+
+The `justfile` automates dependency installation and builds. Install
+[`just`](https://github.com/casey/just) with cargo:
+
+```bash
+cargo install just
+```
+
+Or via your system package manager:
+
+```bash
+# Linux (Debian/Ubuntu)
+sudo apt install just
+
+# macOS
+brew install just
+
+# Windows
+winget install Casey.Just
+```
+
+You can also run `just --list` at any time to see all available commands.
+
+---
+
+## System dependencies
+
+Several Rust crates Starling depends on compile native C/C code (Opus codec,
+crypto, audio I/O). These require system-level tools and libraries that cargo
+can't install automatically.
 
 ### Linux / WSL2
 
@@ -38,35 +130,56 @@ STARLING_NAME=Alice just run
 just install-deps
 ```
 
-Or manually:
+Or manually by distro:
 
 ```bash
-# Debian/Ubuntu
+# Debian / Ubuntu
 sudo apt install build-essential cmake pkg-config libasound2-dev libpulse-dev
 
 # Fedora
 sudo dnf install gcc cmake pkgconf-pkg-config alsa-lib-devel pulseaudio-libs-devel
 
-# Arch
+# Arch Linux
 sudo pacman -S base-devel cmake pkgconf alsa-lib pulseaudio
 ```
 
 | Package | Why it's needed |
 |---------|----------------|
-| `build-essential` (gcc) | Compiling native C code (Opus, ring crypto) |
-| `cmake` | Building libopus from source via `audiopus_sys` |
+| `build-essential` / `base-devel` | C/C compiler (gcc) for native code |
+| `cmake` | Building libopus from source (`audiopus_sys` crate) |
 | `pkg-config` | Locating ALSA and PulseAudio libraries at build time |
 | `libasound2-dev` | ALSA headers — cpal compiles the ALSA backend on Linux |
-| `libpulse-dev` | PulseAudio headers — cpal uses PulseAudio at runtime on WSLg |
+| `libpulse-dev` | PulseAudio headers — cpal uses PulseAudio at runtime |
 
 **WSL2 audio:** No extra setup needed. WSLg (Windows 11) provides a
 PulseAudio server automatically at `/mnt/wslg/PulseServer`. The app connects
 to it directly — no `libasound2-plugins` or `/etc/asound.conf` required.
 
+If you're on an older Windows 10 build without WSLg, you'll need to set up
+PulseAudio forwarding manually or use a native Windows build instead.
+
 ### Windows
 
-Install [CMake](https://cmake.org/download/) and add it to your `PATH`.
-A C/C++ compiler (MSVC via Visual Studio Build Tools) is also required.
+Install the following:
+
+1. **Visual Studio Build Tools 2022** — provides the MSVC C/C compiler.
+   Download from [visualstudio.microsoft.com](https://visualstudio.microsoft.com/visual-cpp-build-tools/).
+   In the installer, select "Desktop development with C++".
+
+2. **CMake** — required to build the Opus codec from source.
+   ```powershell
+   winget install Kitware.CMake
+   ```
+   Or download from [cmake.org/download](https://cmake.org/download/) and add
+   it to your `PATH`.
+
+3. **pkg-config** (optional but recommended):
+   ```powershell
+   winget install pkgconf
+   ```
+
+Audio I/O uses WASAPI (Windows Audio Session API) — no extra audio packages
+needed.
 
 ### macOS
 
@@ -74,7 +187,51 @@ A C/C++ compiler (MSVC via Visual Studio Build Tools) is also required.
 brew install cmake pkg-config
 ```
 
-CoreAudio is used for audio I/O (no extra audio packages needed).
+Audio I/O uses CoreAudio — no extra audio packages needed. The Opus codec is
+built from source via CMake (same as Linux).
+
+---
+
+## Running Starling
+
+Once Rust and system dependencies are installed:
+
+### Start a new flock
+
+```bash
+just run
+# or
+cargo run -- open
+```
+
+The app starts and the header shows an invite ticket like:
+
+```
+invite: 0a1b2c3d...
+```
+
+Share this ticket with another bird so they can join your flock.
+
+### Join an existing flock
+
+```bash
+just join <ticket>
+# or
+cargo run -- join <ticket>
+```
+
+### Set your name
+
+Your display name defaults to `anon`. Set it with the `STARLING_NAME`
+environment variable:
+
+```bash
+STARLING_NAME=Alice just run
+# or
+STARLING_NAME=Alice cargo run -- open
+```
+
+---
 
 ## Keybindings
 
@@ -86,6 +243,8 @@ CoreAudio is used for audio I/O (no extra audio packages needed).
 | `Tab` | Cycle selected peer |
 | `Backspace` | Delete last character |
 | `Esc` | Quit |
+
+---
 
 ## Architecture
 
@@ -104,16 +263,71 @@ CoreAudio is used for audio I/O (no extra audio packages needed).
 └──────────────────────────────────────────────────────────────────┘
 ```
 
-- **`event.rs`** — `Command` (UI→net) and `AppEvent` (net→UI) types
-- **`net.rs`** — owns the iroh endpoint, gossip subscription, voice handler
-- **`call.rs`** — opens/accepts QUIC streams for voice datagrams
-- **`voice.rs`** — mic capture: cpal input → Opus encoder → channel
-- **`playback.rs`** — audio output: channel → Opus decoder → ring buffer → cpal output
-- **`ui.rs`** — terminal rendering and UI state (`App` struct)
-- **`main.rs`** — event loop, keyboard handling, wires everything together
+### Source layout
 
-Audio is encoded as 48 kHz mono Opus, 20 ms frames (960 samples), sent as
-QUIC datagrams. Playback uses a 2-second ring buffer to absorb jitter.
+| File | Responsibility |
+|------|---------------|
+| `event.rs` | `Command` (UI→net) and `AppEvent` (net→UI) types |
+| `net.rs` | Owns the iroh endpoint, gossip subscription, voice handler |
+| `call.rs` | Opens/accepts QUIC streams for voice datagrams |
+| `voice.rs` | Mic capture: cpal input → Opus encoder → channel |
+| `playback.rs` | Audio output: channel → Opus decoder → ring buffer → cpal output |
+| `ui.rs` | Terminal rendering and UI state (`App` struct) |
+| `main.rs` | Event loop, keyboard handling, wires everything together |
+
+### How the murmuration works
+
+Birds connect to the murmuration through iroh's global relay network and
+node discovery. No central server coordinates them:
+
+1. A bird opens a flock by binding a QUIC endpoint and subscribing to a
+   gossip topic (derived from a shared name via SHA-256).
+2. The opener's invite ticket encodes their endpoint address.
+3. Other birds join by connecting to the opener's endpoint, which bootstraps
+   them into the gossip mesh.
+4. Text messages broadcast over gossip reach all birds in the mesh.
+5. Voice calls are direct peer-to-peer QUIC datagram streams — no relay
+   needed if direct connectivity is available, with relay fallback.
+
+Audio is encoded as 48 kHz mono Opus, 20 ms frames (960 samples per frame),
+sent as QUIC datagrams. Playback uses a 2-second ring buffer to absorb
+network jitter.
+
+---
+
+## Troubleshooting
+
+### `cmake not found`
+
+Install CMake (see [System dependencies](#system-dependencies) for your
+platform), or run `just install-deps` on Linux.
+
+### `pkg-config failed — alsa development headers are not installed`
+
+Install ALSA headers: `sudo apt install libasound2-dev` (Debian/Ubuntu).
+
+### No microphone / no audio output (WSL2)
+
+Ensure you're running Windows 11 with WSLg enabled. WSLg provides PulseAudio
+automatically. If audio doesn't work, verify the PulseAudio server is
+accessible:
+
+```bash
+pactl info    # should show "Server String: unix:/mnt/wslg/PulseServer"
+```
+
+If `pactl` is not found, install it:
+
+```bash
+sudo apt install pulseaudio-utils
+```
+
+### Build is slow on first compile
+
+The Opus codec is compiled from source via CMake on the first build.
+Subsequent builds are cached. expect 2–5 minutes for the initial build.
+
+---
 
 ## License
 
