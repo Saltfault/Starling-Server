@@ -26,7 +26,17 @@ const FRAME: usize = 960;
 /// * `muted` — checked on every frame. When `true`, audio is still read from
 ///   the device (to keep the stream healthy) but frames are discarded instead
 ///   of being encoded and sent.
+///
+/// ALSA error spam is suppressed on Unix so that fallback failures don't
+/// corrupt the terminal UI.
 pub fn start_capture(
+    net_tx: mpsc::UnboundedSender<Vec<u8>>,
+    muted: Arc<AtomicBool>,
+) -> anyhow::Result<cpal::Stream> {
+    crate::util::suppress_stderr(|| start_capture_inner(net_tx, muted))
+}
+
+fn start_capture_inner(
     net_tx: mpsc::UnboundedSender<Vec<u8>>,
     muted: Arc<AtomicBool>,
 ) -> anyhow::Result<cpal::Stream> {

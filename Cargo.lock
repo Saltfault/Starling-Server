@@ -14,6 +14,7 @@ dependencies = [
  "data-encoding",
  "iroh",
  "iroh-gossip",
+ "libc",
  "n0-future",
  "opus",
  "postcard",

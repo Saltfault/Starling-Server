@@ -49,7 +49,14 @@ impl Playback {
     ///
     /// The stream starts immediately and plays silence until frames arrive.
     /// Returns an error if no output device is available.
+    ///
+    /// ALSA error spam is suppressed on Unix so that fallback failures don't
+    /// corrupt the terminal UI.
     pub fn new() -> anyhow::Result<Self> {
+        crate::util::suppress_stderr(Self::new_inner)
+    }
+
+    fn new_inner() -> anyhow::Result<Self> {
         let device = cpal::default_host()
             .default_output_device()
             .ok_or_else(|| anyhow::anyhow!("no audio output device found"))?;

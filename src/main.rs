@@ -37,6 +37,7 @@ mod event;
 mod net;
 mod playback;
 mod ui;
+mod util;
 mod voice;
 
 use crossterm::{
