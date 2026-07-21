@@ -45,7 +45,6 @@ use crossterm::{
     terminal::*,
 };
 use event::{AppEvent, Command};
-use iroh_tickets::endpoint::EndpointTicket;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc;
@@ -53,17 +52,14 @@ use ui::App;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // ── Parse CLI args: `starling open` or `starling join <ticket>` ────
+    // ── Parse CLI args: `starling open` or `starling join <node-id>` ──
     let args: Vec<String> = std::env::args().collect();
     let (topic, bootstrap) = match args.get(1).map(String::as_str) {
         Some("join") => {
-            // A ticket carries the topic-opener's address(es).
-            let ticket: EndpointTicket = args[2].parse()?;
-            // Register the opener's addr, then bootstrap from their ID.
-            (
-                net::topic_for("starling/global"),
-                vec![ticket.endpoint_addr().id],
-            )
+            // The ticket is just the opener's node ID (64 hex chars).
+            // iroh's N0 discovery resolves it to their relay/direct address.
+            let node_id: iroh::EndpointId = args[2].parse()?;
+            (net::topic_for("starling/global"), vec![node_id])
         }
         _ => (net::topic_for("starling/global"), vec![]), // "open"
     };
@@ -139,7 +135,6 @@ async fn main() -> anyhow::Result<()> {
                 }
                 AppEvent::PeerDisconnected(id) => {
                     app.peers.retain(|p| p != &id);
-                    // Fix up the selected index if it's now out of bounds.
                     if !app.peers.is_empty() {
                         app.selected_peer %= app.peers.len();
                     } else {

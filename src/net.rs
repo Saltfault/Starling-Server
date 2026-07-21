@@ -22,7 +22,6 @@ use iroh_gossip::{
     net::{GOSSIP_ALPN, Gossip},
     proto::TopicId,
 };
-use iroh_tickets::endpoint::EndpointTicket;
 use n0_future::StreamExt;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -71,9 +70,11 @@ pub async fn run(
         )
         .spawn();
 
-    // Hand the UI a ticket that others can use to join us.
-    let ticket = EndpointTicket::new(endpoint.addr());
-    let _ = evt_tx.send(AppEvent::Ticket(ticket.to_string()));
+    // Hand the UI a short invite ticket — just our node ID (64 hex chars).
+    // iroh's N0 discovery system resolves it for joiners, so we don't need
+    // to encode the full endpoint address.
+    let node_id = endpoint.addr().id;
+    let _ = evt_tx.send(AppEvent::Ticket(node_id.to_string()));
 
     // Subscribe to the gossip topic and join the mesh.
     let (sender, mut receiver) = gossip.subscribe_and_join(topic, bootstrap).await?.split();
@@ -99,7 +100,6 @@ pub async fn run(
                 }
 
                 Command::StartCall(addr) => {
-                    // Start mic capture and open a voice stream to the peer.
                     let (mic_tx, mic_rx) = mpsc::unbounded_channel();
                     _mic_stream = Some(crate::voice::start_capture(mic_tx, muted.clone())?);
                     let ep = endpoint.clone();
@@ -109,8 +109,6 @@ pub async fn run(
                 }
 
                 Command::HangUp => {
-                    // Dropping the stream stops the mic. The spawned
-                    // place_call task will end when mic_rx is dropped.
                     _mic_stream = None;
                 }
 
@@ -118,21 +116,26 @@ pub async fn run(
             },
 
             // ── Gossip events from the network ────────────────────────
-            Some(event) = receiver.next() => match event? {
-                Event::Received(msg) => {
-                    if let Ok(m) = postcard::from_bytes::<ChatMessage>(&msg.content) {
-                        let _ = evt_tx.send(AppEvent::Message(m));
+            Some(event) = receiver.next() => {
+                match event {
+                    Ok(Event::Received(msg)) => {
+                        if let Ok(m) = postcard::from_bytes::<ChatMessage>(&msg.content) {
+                            let _ = evt_tx.send(AppEvent::Message(m));
+                        }
+                    }
+                    Ok(Event::NeighborUp(id)) => {
+                        let _ = evt_tx.send(AppEvent::PeerConnected(id));
+                    }
+                    Ok(Event::NeighborDown(id)) => {
+                        let _ = evt_tx.send(AppEvent::PeerDisconnected(id));
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        // Don't kill the network task on a stream error
+                        // (e.g. lagged receiver) — just log and continue.
+                        eprintln!("gossip stream error: {e}");
                     }
                 }
-
-                Event::NeighborUp(id) => {
-                    let _ = evt_tx.send(AppEvent::PeerConnected(id));
-                }
-                Event::NeighborDown(id) => {
-                    let _ = evt_tx.send(AppEvent::PeerDisconnected(id));
-                }
-
-                _ => {}
             }
         }
     }

@@ -71,15 +71,6 @@ impl App {
             .get(self.selected_peer)
             .map(|id| EndpointAddr::from(*id))
     }
-
-    /// Short label for the currently selected peer (first 8 hex chars of the
-    /// node ID), for display in the status line.
-    pub fn selected_peer_label(&self) -> String {
-        match self.peers.get(self.selected_peer) {
-            Some(id) => id.fmt_short().to_string(),
-            None => "none".into(),
-        }
-    }
 }
 
 // ── Top-level draw dispatcher ───────────────────────────────────────────
@@ -220,12 +211,12 @@ fn draw_chat(f: &mut Frame, app: &App) {
 
     // ── Status: call state + selected peer ─────────────────────────────
     let status = if app.in_call {
-        format!("🔊 in call · {}", if app.muted { "muted" } else { "live" })
-    } else {
         format!(
-            "○ idle · peer: {} · Ctrl+K to call · Tab to cycle",
-            app.selected_peer_label()
+            "🔊 in call · {} · Ctrl+K to hang up",
+            if app.muted { "muted" } else { "live" }
         )
+    } else {
+        "○ idle · Ctrl+K to call · Tab to cycle · Ctrl+M to mute".into()
     };
     f.render_widget(
         Paragraph::new(status).style(Style::new().fg(Color::Rgb(111, 174, 157))),

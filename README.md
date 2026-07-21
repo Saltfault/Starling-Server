@@ -242,13 +242,14 @@ just run
 cargo run -- open
 ```
 
-The app starts and the header shows an invite ticket like:
+The app starts and the header shows an invite ticket — a 64-character
+hex string that is the opener's node ID:
 
 ```
-invite: 0a1b2c3d...
+invite: a1b2c3d4e5f6...
 ```
 
-Share this ticket with another bird so they can join your flock.
+Share this with another bird so they can join your flock.
 
 ### Join an existing flock
 
@@ -317,7 +318,8 @@ node discovery. No central server coordinates them:
 
 1. A bird opens a flock by binding a QUIC endpoint and subscribing to a
    gossip topic (derived from a shared name via SHA-256).
-2. The opener's invite ticket encodes their endpoint address.
+2. The opener's invite ticket is their node ID (64 hex chars). iroh's N0
+   discovery resolves it to their relay and direct addresses.
 3. Other birds join by connecting to the opener's endpoint, which bootstraps
    them into the gossip mesh.
 4. Text messages broadcast over gossip reach all birds in the mesh.
