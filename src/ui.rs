@@ -1,6 +1,13 @@
 //! UI state and rendering. The [`App`] struct holds all mutable state that
 //! the terminal loop reads and writes. The [`draw`] function renders it.
 //!
+//! The app has two phases:
+//!
+//! 1. **Name entry** — a centered popup asks for the bird's display name.
+//!    Rendered when `app.name` is empty.
+//! 2. **Chat** — the full chat UI with messages, a birds panel (peer list),
+//!    call status, and text input. Rendered once `app.name` is set.
+//!
 //! This module is purely presentational — it never touches the network or
 //! audio directly. State changes happen in `main.rs` in response to keyboard
 //! input or [`AppEvent`](crate::event::AppEvent)s.
@@ -9,16 +16,24 @@ use crate::event::ChatMessage;
 use iroh::{EndpointAddr, EndpointId};
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, List, ListItem, Paragraph},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
 };
 
 /// All mutable UI state. Updated by `main.rs` in response to keyboard input
 /// and network events; read by [`draw`] every frame.
 #[derive(Default)]
 pub struct App {
+    // ── Name entry phase ──────────────────────────────────────────────
+    /// The bird's confirmed display name. When empty, the UI shows the
+    /// name-entry popup instead of the chat.
+    pub name: String,
+    /// Buffer for the name-entry input field.
+    pub name_input: String,
+
+    // ── Chat phase ────────────────────────────────────────────────────
     /// Chat messages received (and echoed from our own broadcasts).
     pub messages: Vec<ChatMessage>,
-    /// Current text input buffer.
+    /// Current text input buffer (for chat messages, not name entry).
     pub input: String,
     /// Connected peer IDs (from gossip neighbor-up/down events).
     pub peers: Vec<EndpointId>,
@@ -34,7 +49,7 @@ pub struct App {
 }
 
 impl App {
-    /// Number of connected peers.
+    /// Number of connected birds.
     pub fn peer_count(&self) -> usize {
         self.peers.len()
     }
@@ -67,17 +82,80 @@ impl App {
     }
 }
 
+// ── Top-level draw dispatcher ───────────────────────────────────────────
+
 /// Render the app state to the terminal.
 ///
-/// Layout (top to bottom):
-/// 1. Header — invite ticket string
-/// 2. Messages — scrollable chat log
-/// 3. Status — call state + selected peer
-/// 4. Input — text entry
+/// Shows the name-entry popup if `app.name` is empty, otherwise shows the
+/// full chat UI.
 pub fn draw(f: &mut Frame, app: &App) {
+    if app.name.is_empty() {
+        draw_name_entry(f, app);
+    } else {
+        draw_chat(f, app);
+    }
+}
+
+// ── Name entry ──────────────────────────────────────────────────────────
+
+/// Render the name-entry popup — a centered box asking the bird for their
+/// display name before joining the murmuration.
+fn draw_name_entry(f: &mut Frame, app: &App) {
+    let area = f.area();
+
+    // Clear the whole screen first.
+    f.render_widget(Clear, area);
+
+    // Center a popup box.
+    let width = 48.min(area.width);
+    let height = 9.min(area.height);
+    let popup = Rect::new(
+        area.x + (area.width.saturating_sub(width)) / 2,
+        area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    );
+
+    f.render_widget(Clear, popup);
+    f.render_widget(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Welcome to Starling "),
+        popup,
+    );
+
+    // Layout inside the popup.
+    let inner = Layout::vertical([
+        Constraint::Length(1), // blank
+        Constraint::Length(1), // subtitle
+        Constraint::Length(1), // blank
+        Constraint::Length(1), // name input
+        Constraint::Length(1), // blank
+        Constraint::Length(1), // hint
+    ])
+    .margin(1)
+    .split(popup);
+
+    f.render_widget(Paragraph::new("Join the murmuration."), inner[1]);
+
+    f.render_widget(
+        Paragraph::new(format!(" Name: {}_", app.name_input)).style(Style::new().fg(Color::Yellow)),
+        inner[3],
+    );
+
+    f.render_widget(
+        Paragraph::new(" Press Enter to continue ").style(Style::new().fg(Color::DarkGray)),
+        inner[5],
+    );
+}
+
+// ── Chat UI ─────────────────────────────────────────────────────────────
+
+/// Render the full chat UI: header, messages + birds panel, status, input.
+fn draw_chat(f: &mut Frame, app: &App) {
     let chunks = Layout::vertical([
         Constraint::Length(1), // header: invite ticket
-        Constraint::Min(1),    // messages
+        Constraint::Min(1),    // messages + birds panel
         Constraint::Length(1), // call status
         Constraint::Length(3), // input
     ])
@@ -90,7 +168,14 @@ pub fn draw(f: &mut Frame, app: &App) {
         chunks[0],
     );
 
-    // ── Messages ───────────────────────────────────────────────────────
+    // ── Messages + Birds panel (horizontal split) ──────────────────────
+    let middle = Layout::horizontal([
+        Constraint::Min(1),     // messages
+        Constraint::Length(24), // birds panel
+    ])
+    .split(chunks[1]);
+
+    // Messages list
     let items: Vec<ListItem> = app
         .messages
         .iter()
@@ -109,10 +194,29 @@ pub fn draw(f: &mut Frame, app: &App) {
         List::new(items).block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(format!(" #global · {} peers ", app.peer_count())),
+                .title(format!(" #global · {} birds ", app.peer_count())),
         ),
-        chunks[1],
+        middle[0],
     );
+
+    // Birds panel — shows all connected peers, with the selected one highlighted
+    let peer_items: Vec<ListItem> = app
+        .peers
+        .iter()
+        .enumerate()
+        .map(|(i, id)| {
+            let prefix = if i == app.selected_peer { "▶ " } else { "  " };
+            ListItem::new(format!("{prefix}{}", id.fmt_short()))
+        })
+        .collect();
+
+    let peer_list = if peer_items.is_empty() {
+        List::new(vec![ListItem::new("  no birds yet")])
+            .block(Block::default().borders(Borders::ALL).title(" birds "))
+    } else {
+        List::new(peer_items).block(Block::default().borders(Borders::ALL).title(" birds "))
+    };
+    f.render_widget(peer_list, middle[1]);
 
     // ── Status: call state + selected peer ─────────────────────────────
     let status = if app.in_call {

@@ -43,12 +43,14 @@ pub fn topic_for(name: &str) -> TopicId {
 /// * `cmd_rx` — receives commands from the UI.
 /// * `evt_tx` — sends events to the UI.
 /// * `muted` — shared mute flag, passed through to the mic capture callback.
+/// * `name` — the bird's display name, used as the author on chat messages.
 pub async fn run(
     topic: TopicId,
     bootstrap: Vec<EndpointId>,
     mut cmd_rx: mpsc::UnboundedReceiver<Command>,
     evt_tx: mpsc::UnboundedSender<AppEvent>,
     muted: Arc<AtomicBool>,
+    name: String,
 ) -> anyhow::Result<()> {
     // Bind a QUIC endpoint with n0's relay and discovery presets.
     let endpoint = Endpoint::bind(presets::N0).await?;
@@ -87,7 +89,7 @@ pub async fn run(
                 Command::SendText(text) => {
                     let msg = ChatMessage {
                         id: uuid::Uuid::new_v4().to_string(),
-                        author: whoami(),
+                        author: name.clone(),
                         body: text,
                         ts: chrono::Utc::now().timestamp_millis(),
                     };
@@ -136,12 +138,6 @@ pub async fn run(
     }
 
     Ok(())
-}
-
-/// Return the display name for this user, from the `STARLING_NAME` env var.
-/// Defaults to `"anon"` if unset.
-fn whoami() -> String {
-    std::env::var("STARLING_NAME").unwrap_or_else(|_| "anon".into())
 }
 
 /// Protocol handler for incoming voice calls. When a peer dials our

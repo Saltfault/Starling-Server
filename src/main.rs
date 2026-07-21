@@ -1,4 +1,5 @@
-//! Starling — a minimal voice + text chat app built on iroh gossip.
+//! Starling — a federated p2p communications platform where peers, known as
+//! birds, communicate via the murmuration.
 //!
 //! Architecture (one task + one UI loop):
 //!
@@ -17,7 +18,10 @@
 //! └──────────────────────────────────────────────────────────────────┘
 //! ```
 //!
-//! Keybindings:
+//! The app starts in **name-entry mode**: a popup asks for the bird's display
+//! name. Once confirmed, the network task is spawned and the chat UI begins.
+//!
+//! Keybindings (chat mode):
 //!
 //! | Key        | Action                          |
 //! |------------|---------------------------------|
@@ -64,20 +68,51 @@ async fn main() -> anyhow::Result<()> {
         _ => (net::topic_for("starling/global"), vec![]), // "open"
     };
 
-    // ── Create the UI ↔ network channels ──────────────────────────────
+    // ── Set up the terminal ───────────────────────────────────────────
+    enable_raw_mode()?;
+    let mut stdout = std::io::stdout();
+    execute!(stdout, EnterAlternateScreen)?;
+    let mut term = ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(stdout))?;
+    let mut app = App::default();
+
+    // ── Phase 1: Name entry ───────────────────────────────────────────
+    //
+    // Show a popup asking for the bird's display name. The network task
+    // hasn't started yet — we need the name before spawning it.
+    loop {
+        term.draw(|f| ui::draw(f, &app))?;
+
+        if ct_event::poll(std::time::Duration::from_millis(50))? {
+            if let Event::Key(k) = ct_event::read()? {
+                match k.code {
+                    KeyCode::Enter if !app.name_input.is_empty() => {
+                        app.name = std::mem::take(&mut app.name_input);
+                        break;
+                    }
+                    KeyCode::Char(c) => app.name_input.push(c),
+                    KeyCode::Backspace => {
+                        app.name_input.pop();
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    // ── Phase 2: Start the network task ───────────────────────────────
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<Command>();
     let (evt_tx, mut evt_rx) = mpsc::unbounded_channel::<AppEvent>();
 
-    // ── Shared mute flag (UI toggles it, mic callback reads it) ────────
+    // Shared mute flag (UI toggles it, mic callback reads it).
     let muted_flag = Arc::new(AtomicBool::new(false));
 
-    // ── Spawn the network task ────────────────────────────────────────
     tokio::spawn(net::run(
         topic,
         bootstrap,
         cmd_rx,
         evt_tx,
         muted_flag.clone(),
+        app.name.clone(),
     ));
 
     // ── Set up audio playback (optional — app works without it) ───────
@@ -89,14 +124,7 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    // ── Set up the terminal ───────────────────────────────────────────
-    enable_raw_mode()?;
-    let mut stdout = std::io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
-    let mut term = ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(stdout))?;
-    let mut app = App::default();
-
-    // ── Main UI loop ──────────────────────────────────────────────────
+    // ── Phase 3: Main chat loop ───────────────────────────────────────
     loop {
         term.draw(|f| ui::draw(f, &app))?;
 

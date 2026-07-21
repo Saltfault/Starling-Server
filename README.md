@@ -24,11 +24,8 @@ Share the invite ticket (shown in the header) with another bird. They join with:
 just join <ticket>   # join an existing flock
 ```
 
-Set your display name (shown next to your messages) with:
-
-```bash
-STARLING_NAME=Alice just run
-```
+When the app starts, a popup asks for your display name (the name other
+birds see next to your messages). Type it and press Enter.
 
 Or without `just`:
 
@@ -222,14 +219,11 @@ cargo run -- join <ticket>
 
 ### Set your name
 
-Your display name defaults to `anon`. Set it with the `STARLING_NAME`
-environment variable:
+When you start Starling, a popup asks for your display name — the name
+other birds see next to your messages in the flock. Type it and press
+Enter to join the murmuration.
 
-```bash
-STARLING_NAME=Alice just run
-# or
-STARLING_NAME=Alice cargo run -- open
-```
+There is no need for environment variables or config files.
 
 ---
 
