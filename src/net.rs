@@ -1,3 +1,16 @@
+//! Network layer: owns the iroh [`Endpoint`], the gossip subscription, and
+//! the voice protocol handler. Bridges the UI ↔ network channels.
+//!
+//! This module is spawned as a single tokio task by `main`. It runs a
+//! `tokio::select!` loop that:
+//!
+//! 1. Receives [`Command`]s from the UI and acts on them (sending text,
+//!    starting/hanging up calls, quitting).
+//! 2. Receives gossip [`Event`]s and forwards them to the UI as [`AppEvent`]s.
+//!
+//! The mic capture stream (`_mic_stream`) is kept alive here for the duration
+//! of a call. Dropping it stops the mic.
+
 use crate::event::{AppEvent, ChatMessage, Command};
 use iroh::{
     Endpoint, EndpointId,
@@ -11,28 +24,41 @@ use iroh_gossip::{
 };
 use iroh_tickets::endpoint::EndpointTicket;
 use n0_future::StreamExt;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use tokio::sync::mpsc;
 
-// Derive a stabe 32 byte topic id from a human name
+/// Derive a stable 32-byte [`TopicId`] from a human-readable name by hashing
+/// it with SHA-256. Everyone who uses the same name gets the same topic.
 pub fn topic_for(name: &str) -> TopicId {
     use sha2::{Digest, Sha256};
     let hash = Sha256::digest(name.as_bytes());
     TopicId::from_bytes(hash.into())
 }
 
-// Spawned once. Owns the endpoint and gossip, bridges the two channels.
-// 'bootstrap' are peers pulled from a join ticket (empty if we are the one who opened it)
+/// The main network loop. Spawned once by `main`.
+///
+/// * `topic` — the gossip topic to subscribe to.
+/// * `bootstrap` — peer IDs from a join ticket (empty if we are the opener).
+/// * `cmd_rx` — receives commands from the UI.
+/// * `evt_tx` — sends events to the UI.
+/// * `muted` — shared mute flag, passed through to the mic capture callback.
 pub async fn run(
     topic: TopicId,
     bootstrap: Vec<EndpointId>,
     mut cmd_rx: mpsc::UnboundedReceiver<Command>,
     evt_tx: mpsc::UnboundedSender<AppEvent>,
+    muted: Arc<AtomicBool>,
 ) -> anyhow::Result<()> {
-    // bind a QUIC endpoint with n0's relay and discovery presets
+    // Bind a QUIC endpoint with n0's relay and discovery presets.
     let endpoint = Endpoint::bind(presets::N0).await?;
-    endpoint.online().await; // wait for a home relay
+    endpoint.online().await; // wait until a home relay is assigned
 
+    // Spawn the gossip sub-protocol.
     let gossip = Gossip::builder().spawn(endpoint.clone());
+
+    // Build the protocol router: accept gossip for chat, and our custom
+    // VoiceProto for voice calls.
     let _router = Router::builder(endpoint.clone())
         .accept(GOSSIP_ALPN, gossip.clone())
         .accept(
@@ -43,17 +69,20 @@ pub async fn run(
         )
         .spawn();
 
-    // hand the UI a ticket others cna use to join us
+    // Hand the UI a ticket that others can use to join us.
     let ticket = EndpointTicket::new(endpoint.addr());
     let _ = evt_tx.send(AppEvent::Ticket(ticket.to_string()));
 
+    // Subscribe to the gossip topic and join the mesh.
     let (sender, mut receiver) = gossip.subscribe_and_join(topic, bootstrap).await?.split();
 
-    // keep the capture stream alive for the duration of a call
+    // Keep the mic capture stream alive for the duration of a call.
+    // Dropping this stops the mic.
     let mut _mic_stream: Option<cpal::Stream> = None;
 
     loop {
         tokio::select! {
+            // ── Commands from the UI ───────────────────────────────────
             Some(cmd) = cmd_rx.recv() => match cmd {
                 Command::SendText(text) => {
                     let msg = ChatMessage {
@@ -68,18 +97,25 @@ pub async fn run(
                 }
 
                 Command::StartCall(addr) => {
+                    // Start mic capture and open a voice stream to the peer.
                     let (mic_tx, mic_rx) = mpsc::unbounded_channel();
-                    _mic_stream = Some(crate::voice::start_capture(mic_tx)?);
+                    _mic_stream = Some(crate::voice::start_capture(mic_tx, muted.clone())?);
                     let ep = endpoint.clone();
                     tokio::spawn(async move {
                         let _ = crate::call::place_call(ep, addr, mic_rx).await;
                     });
                 }
-                Command::HangUp => { _mic_stream = None; }   // dropping stops the mic
+
+                Command::HangUp => {
+                    // Dropping the stream stops the mic. The spawned
+                    // place_call task will end when mic_rx is dropped.
+                    _mic_stream = None;
+                }
 
                 Command::Quit => break,
             },
 
+            // ── Gossip events from the network ────────────────────────
             Some(event) = receiver.next() => match event? {
                 Event::Received(msg) => {
                     if let Ok(m) = postcard::from_bytes::<ChatMessage>(&msg.content) {
@@ -87,10 +123,13 @@ pub async fn run(
                     }
                 }
 
-                Event::NeighborUp(id) =>
-                    { let _ = evt_tx.send(AppEvent::PeerConnected(id.to_string())); }
-                Event::NeighborDown(id) =>
-                    { let _ = evt_tx.send(AppEvent::PeerDisconnected(id.to_string())); }
+                Event::NeighborUp(id) => {
+                    let _ = evt_tx.send(AppEvent::PeerConnected(id));
+                }
+                Event::NeighborDown(id) => {
+                    let _ = evt_tx.send(AppEvent::PeerDisconnected(id));
+                }
+
                 _ => {}
             }
         }
@@ -99,10 +138,15 @@ pub async fn run(
     Ok(())
 }
 
+/// Return the display name for this user, from the `STARLING_NAME` env var.
+/// Defaults to `"anon"` if unset.
 fn whoami() -> String {
     std::env::var("STARLING_NAME").unwrap_or_else(|_| "anon".into())
 }
 
+/// Protocol handler for incoming voice calls. When a peer dials our
+/// `VOICE_ALPN`, this accepts the connection and forwards voice frames to the
+/// UI as [`AppEvent::VoiceFrame`].
 #[derive(Debug)]
 struct VoiceProto {
     evt_tx: mpsc::UnboundedSender<AppEvent>,
