@@ -143,8 +143,9 @@ fn draw_name_entry(f: &mut Frame, app: &App) {
 // ── Chat UI ─────────────────────────────────────────────────────────────
 
 /// Parse the 6 hex digits out of a room code like "BIRD00CCFF" and return
-/// the corresponding RGB color. Returns `None` if the code isn't valid.
-fn room_code_color(code: &str) -> Option<Color> {
+/// the corresponding RGB values as (r, g, b). Returns `None` if the code
+/// isn't valid.
+fn room_code_rgb(code: &str) -> Option<(u8, u8, u8)> {
     // Expected format: BIRD + 6 hex digits (e.g. BIRD00CCFF)
     let hex = code.strip_prefix("BIRD")?;
     if hex.len() != 6 {
@@ -153,7 +154,7 @@ fn room_code_color(code: &str) -> Option<Color> {
     let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
     let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
     let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
-    Some(Color::Rgb(r, g, b))
+    Some((r, g, b))
 }
 
 /// Render the full chat UI: header, messages + birds panel, status, input.
@@ -172,9 +173,15 @@ fn draw_chat(f: &mut Frame, app: &App) {
     let mut header_spans: Vec<Span> = Vec::new();
 
     // Two half-blocks colored with the room code's RGB value, shown to the
-    // left of the code text. Only rendered when the code is a valid hex code.
-    if let Some(color) = room_code_color(invite) {
-        header_spans.push(Span::styled("▀▄", Style::new().fg(color)));
+    // left of the code text. The filled half uses the full color; the empty
+    // half uses 50% of the color (darkened) as the background.
+    if let Some((r, g, b)) = room_code_rgb(invite) {
+        let full = Color::Rgb(r, g, b);
+        let half = Color::Rgb(r / 2, g / 2, b / 2);
+        // ▀: top half = full color (fg), bottom half = 50% color (bg)
+        header_spans.push(Span::styled("▀", Style::new().fg(full).bg(half)));
+        // ▄: bottom half = full color (fg), top half = 50% color (bg)
+        header_spans.push(Span::styled("▄", Style::new().fg(full).bg(half)));
         header_spans.push(Span::raw(" "));
     }
 
