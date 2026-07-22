@@ -208,6 +208,7 @@ async fn main() -> anyhow::Result<()> {
 
                     KeyCode::Esc => {
                         let _ = cmd_tx.send(Command::Quit);
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                         break;
                     }
 
