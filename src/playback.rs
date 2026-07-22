@@ -1,13 +1,19 @@
 //! Audio playback: decodes incoming Opus frames and plays them through a cpal
 //! output stream.
+//!
+//! Uses stereo (2-channel) audio for higher quality voice calls.
 
 use crate::opus_ffi::{Channels, Decoder};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use ringbuf::{CachingCons, CachingProd, SharedRb, storage::Heap, traits::*};
 
 const SAMPLE_RATE: u32 = 48_000;
-const FRAME: usize = 960;
-const BUFFER_CAPACITY: usize = SAMPLE_RATE as usize * 2;
+const CHANNELS: usize = 2;
+const FRAME_SAMPLES: usize = 960;
+/// Total interleaved samples per frame.
+const FRAME: usize = FRAME_SAMPLES * CHANNELS;
+/// Ring buffer capacity: ~2 seconds of stereo audio.
+const BUFFER_CAPACITY: usize = SAMPLE_RATE as usize * CHANNELS * 2;
 
 type Prod = CachingProd<std::sync::Arc<SharedRb<Heap<f32>>>>;
 type Cons = CachingCons<std::sync::Arc<SharedRb<Heap<f32>>>>;
@@ -45,7 +51,7 @@ impl Playback {
         .ok_or_else(|| anyhow::anyhow!("no audio output device found"))?;
 
         let cfg = cpal::StreamConfig {
-            channels: 1,
+            channels: CHANNELS as u16,
             sample_rate: SAMPLE_RATE,
             buffer_size: cpal::BufferSize::Default,
         };
@@ -66,7 +72,7 @@ impl Playback {
         )?;
 
         stream.play()?;
-        let decoder = Decoder::new(SAMPLE_RATE, Channels::Mono)?;
+        let decoder = Decoder::new(SAMPLE_RATE, Channels::Stereo)?;
 
         Ok(Self {
             decoder,
@@ -78,8 +84,10 @@ impl Playback {
     pub fn push_opus(&mut self, bytes: &[u8]) {
         let mut pcm = [0f32; FRAME];
         match self.decoder.decode_float(bytes, &mut pcm, false) {
+            // decode_float returns samples per channel; total = n * channels
             Ok(n) => {
-                self.producer.push_slice(&pcm[..n]);
+                let total = n * CHANNELS;
+                self.producer.push_slice(&pcm[..total]);
             }
             Err(e) => crate::logger::error(&format!("opus decode error: {e}")),
         }

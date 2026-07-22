@@ -28,6 +28,7 @@ use bindings::{
 /// Opus encoder. Encodes f32 PCM to compressed Opus bytes.
 pub struct Encoder {
     inner: *mut OpusEncoder,
+    channels: usize,
 }
 
 impl Encoder {
@@ -45,16 +46,21 @@ impl Encoder {
         if error != 0 || inner.is_null() {
             return Err(Error { code: error });
         }
-        Ok(Self { inner })
+        Ok(Self {
+            inner,
+            channels: channels as usize,
+        })
     }
 
-    /// Encode a frame of f32 PCM samples. Returns the number of encoded bytes.
+    /// Encode a frame of interleaved f32 PCM samples. Returns the number of
+    /// encoded bytes. `pcm` must contain `frame_size * channels` samples.
     pub fn encode_float(&mut self, pcm: &[f32], output: &mut [u8]) -> Result<usize, Error> {
+        let frame_size = pcm.len() / self.channels;
         let n = unsafe {
             opus_encode_float(
                 self.inner,
                 pcm.as_ptr(),
-                (pcm.len() / 1) as c_int,
+                frame_size as c_int,
                 output.as_mut_ptr(),
                 output.len() as c_int,
             )
@@ -77,6 +83,7 @@ unsafe impl Send for Encoder {}
 /// Opus decoder. Decodes compressed Opus bytes to f32 PCM samples.
 pub struct Decoder {
     inner: *mut OpusDecoder,
+    channels: usize,
 }
 
 impl Decoder {
@@ -88,24 +95,29 @@ impl Decoder {
         if error != 0 || inner.is_null() {
             return Err(Error { code: error });
         }
-        Ok(Self { inner })
+        Ok(Self {
+            inner,
+            channels: channels as usize,
+        })
     }
 
-    /// Decode an Opus packet to f32 PCM. Returns the number of decoded
-    /// samples per channel.
+    /// Decode an Opus packet to interleaved f32 PCM. Returns the number of
+    /// decoded samples per channel. `output` must be large enough for
+    /// `frame_size * channels` samples.
     pub fn decode_float(
         &mut self,
         data: &[u8],
         output: &mut [f32],
         decode_fec: bool,
     ) -> Result<usize, Error> {
+        let frame_size = output.len() / self.channels;
         let n = unsafe {
             opus_decode_float(
                 self.inner,
                 data.as_ptr(),
                 data.len() as c_int,
                 output.as_mut_ptr(),
-                (output.len() / 1) as c_int,
+                frame_size as c_int,
                 if decode_fec { 1 } else { 0 },
             )
         };
