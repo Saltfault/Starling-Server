@@ -23,43 +23,54 @@ that installs the ALSA→PulseAudio bridge. See
 
 ---
 
-## Getting Starling
+## Getting started
 
-### Option A: Clone with git (recommended)
-
-Gives you the full project including the `justfile` for automated setup:
-
-```bash
-git clone https://forgejo.hearthhome.lol/Saltfault/Starling.git
-cd Starling
-```
-
-### Option B: Install with cargo (binary only)
+**Install Starling:**
 
 ```bash
 cargo install --git https://forgejo.hearthhome.lol/Saltfault/Starling.git
 ```
 
-Then run `starling open` or `starling join BIRD00CCFF` directly. You'll still
-need the system dependencies below — `cargo install` doesn't include the
-`justfile`.
+**Run it:**
+
+```bash
+starling open
+```
+
+The header shows a room code like `BIRD00CCFF`. Share it with another bird —
+they join with:
+
+```bash
+starling join BIRD00CCFF
+```
+
+When the app starts, a popup asks for your display name. Type it and press
+Enter.
+
+> **Developing?** You can also clone and run from source:
+> ```bash
+> git clone https://forgejo.hearthhome.lol/Saltfault/Starling.git
+> cd Starling
+> cargo run -- open
+> ```
+> The `justfile` provides `just install-deps`, `just setup-wsl-audio`,
+> `just run`, and `just join <code>` as shortcuts.
 
 ---
 
 ## Platform setup
 
-Follow the section for your platform. Each one covers Rust, `just`, system
-dependencies, and first run.
+Before installing Starling, you need Rust, a C compiler, and CMake (for
+building the Opus codec from source). Follow the section for your platform.
 
 ### Windows
 
-**1. Install Visual Studio C++ Build Tools** (provides the MSVC compiler
-needed by native Rust crates):
+**1. Install Visual Studio C++ Build Tools** (provides the MSVC compiler):
 
 Download from [visualstudio.microsoft.com](https://visualstudio.microsoft.com/visual-cpp-build-tools/).
 In the installer, select **"Desktop development with C++"**.
 
-**2. Install CMake** (needed to build the Opus codec from source):
+**2. Install CMake:**
 
 ```powershell
 winget install Kitware.CMake
@@ -76,18 +87,16 @@ winget install Rustlang.Rustup
 
 Or download and run [rustup-init.exe](https://win.rustup.rs/x86_64).
 
-**4. Install `just`:**
+**4. Install Starling:**
 
 ```powershell
-cargo install just
+cargo install --git https://forgejo.hearthhome.lol/Saltfault/Starling.git
 ```
 
 **5. Run:**
 
 ```powershell
-cargo run -- open
-# or
-just run
+starling open
 ```
 
 Audio uses WASAPI (Windows Audio Session API) — works out of the box, no
@@ -120,18 +129,16 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source "$HOME/.cargo/env"
 ```
 
-**5. Install `just`:**
+**5. Install Starling:**
 
 ```bash
-cargo install just
+cargo install --git https://forgejo.hearthhome.lol/Saltfault/Starling.git
 ```
 
 **6. Run:**
 
 ```bash
-just run
-# or
-cargo run -- open
+starling open
 ```
 
 Audio uses CoreAudio — works out of the box, no extra audio packages needed.
@@ -151,11 +158,6 @@ sudo dnf install gcc cmake pkgconf-pkg-config alsa-lib-devel pulseaudio-libs-dev
 sudo pacman -S base-devel cmake pkgconf alsa-lib pulseaudio
 ```
 
-Or with `just`:
-```bash
-just install-deps
-```
-
 **2. Install Rust:**
 
 ```bash
@@ -163,18 +165,16 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source "$HOME/.cargo/env"
 ```
 
-**3. Install `just`:**
+**3. Install Starling:**
 
 ```bash
-cargo install just
+cargo install --git https://forgejo.hearthhome.lol/Saltfault/Starling.git
 ```
 
 **4. Run:**
 
 ```bash
-just run
-# or
-cargo run -- open
+starling open
 ```
 
 Audio uses PulseAudio (with ALSA fallback) — works out of the box on most
@@ -205,42 +205,38 @@ sudo apt update
 sudo apt install build-essential cmake pkg-config libasound2-dev libpulse-dev
 ```
 
-Or with `just`:
-```bash
-just install-deps
-```
-
-**3. Install Rust and `just`:**
+**3. Install Rust:**
 
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source "$HOME/.cargo/env"
-cargo install just
 ```
 
-**4. Enable voice calls (one-time setup):**
-
-WSLg provides a PulseAudio server, but the pure-Rust PulseAudio crate that
-cpal uses can't authenticate with it. The fix is to install the ALSA→PulseAudio
-bridge, which uses the C library (`libpulse`) that handles WSLg auth correctly:
+**4. Install `just` and enable voice calls (one-time setup):**
 
 ```bash
+cargo install just
 just setup-wsl-audio
 ```
 
-This installs `libasound2-plugins` and writes `/etc/asound.conf` to route
-ALSA through PulseAudio. After this, voice calls work — cpal falls back to
-the ALSA backend, which routes through PulseAudio via the C library.
+`just setup-wsl-audio` installs `libasound2-plugins` and writes
+`/etc/asound.conf` to route ALSA through PulseAudio. This is needed because
+the pure-Rust PulseAudio crate that cpal uses can't authenticate with WSLg's
+server, but the C library (`libpulse`) that ALSA's pulse plugin uses can.
 
-**5. Run:**
+If you skip this step, text chat works but voice calls won't.
+
+**5. Install Starling:**
 
 ```bash
-just run
-# or
-cargo run -- open
+cargo install --git https://forgejo.hearthhome.lol/Saltfault/Starling.git
 ```
 
-If you skip step 4, text chat works but voice calls won't.
+**6. Run:**
+
+```bash
+starling open
+```
 
 If you're on an older Windows 10 build without WSLg, audio won't work in
 WSL2 — use a [native Windows build](#windows) instead.
@@ -252,15 +248,13 @@ WSL2 — use a [native Windows build](#windows) instead.
 ### Start a new flock
 
 ```bash
-just run
-# or
-cargo run -- open
+starling open
 ```
 
-The app starts and the header shows a room code:
+The app starts and the header shows a room code with a color swatch:
 
 ```
- flock: BIRD00CCFF
+▀▄ flock: BIRD00CCFF
 ```
 
 Share this code with another bird so they can join your flock.
@@ -268,9 +262,7 @@ Share this code with another bird so they can join your flock.
 ### Join an existing flock
 
 ```bash
-just join BIRD00CCFF
-# or
-cargo run -- join BIRD00CCFF
+starling join BIRD00CCFF
 ```
 
 ### Set your name
@@ -357,8 +349,7 @@ network jitter.
 
 ### `cmake not found`
 
-Install CMake for your platform (see [Platform setup](#platform-setup)),
-or run `just install-deps` on Linux/macOS.
+Install CMake for your platform (see [Platform setup](#platform-setup)).
 
 ### `pkg-config failed — alsa development headers are not installed` (Linux)
 
