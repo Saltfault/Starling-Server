@@ -1,12 +1,9 @@
-# Mirror the Forgejo repo (source of truth) to GitHub every night.
-# Also runnable manually from the Actions tab via workflow_dispatch.
-
 name: Mirror from Forgejo
 
 on:
   schedule:
-    - cron: "0 3 * * *" # nightly at 03:00 UTC
-  workflow_dispatch: # manual trigger
+    - cron: "0 3 * * *"
+  workflow_dispatch:
 
 jobs:
   mirror:
@@ -19,6 +16,6 @@ jobs:
 
       - name: Fetch from Forgejo and push
         run: |
-          git remote add forgejo https://forgejo.hearthhome.lol/Saltfault/Starling-TUI.git || true
+          git remote add forgejo https://forgejo.hearthhome.lol/Saltfault/Starling-Server.git || true
           git fetch forgejo main
           git push origin forgejo/main:main
