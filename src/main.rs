@@ -65,8 +65,9 @@ async fn main() -> anyhow::Result<()> {
     let mut term = ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(stdout))?;
     let mut app = App::default();
 
+    // For a joiner, the room code is the opener's node ID (from the join
+    // code), shown immediately. For an opener it arrives via AppEvent::Ticket.
     if let Some(node_id) = bootstrap.first() {
-        app.invite = Some(net::room_code_from_node_id(node_id));
         app.node_id = Some(net::encode_node_id(node_id));
     }
 
@@ -136,12 +137,11 @@ async fn main() -> anyhow::Result<()> {
                 AppEvent::PeerNamed(id, name) => {
                     app.peer_names.insert(id, name);
                 }
-                AppEvent::Ticket(node_id_str) => {
-                    if app.invite.is_none() {
-                        if let Some(node_id) = net::decode_node_id(&node_id_str) {
-                            app.invite = Some(net::room_code_from_node_id(&node_id));
-                            app.node_id = Some(node_id_str);
-                        }
+                AppEvent::Ticket(code) => {
+                    // Our own room code (openers only; joiners already have
+                    // the opener's code set above).
+                    if app.node_id.is_none() {
+                        app.node_id = Some(code);
                     }
                 }
                 AppEvent::VoiceFrame(bytes) => {

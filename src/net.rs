@@ -29,14 +29,8 @@ pub fn topic_for(name: &str) -> TopicId {
     TopicId::from_bytes(hash.into())
 }
 
-/// Derive a short room code from a node ID (first 3 bytes as hex).
-pub fn room_code_from_node_id(node_id: &EndpointId) -> String {
-    let bytes = node_id.as_bytes();
-    let hex: String = (0..3).map(|i| format!("{:02X}", bytes[i])).collect();
-    format!("BIRD{hex}")
-}
-
-/// Encode a node ID as a shareable ticket string (`BIRD-RRGGBB-...`).
+/// Encode a node ID as the full room code / invite (`BIRD-RRGGBB-...`).
+/// This single string is both what's displayed and what peers join with.
 pub fn encode_node_id(node_id: &EndpointId) -> String {
     let bytes = node_id.as_bytes();
     let mut padded = bytes.to_vec();
@@ -112,16 +106,16 @@ pub async fn run(
 
     let my_node_id = endpoint.addr().id;
     let opener_id = bootstrap.first().copied().unwrap_or(my_node_id);
-    let room_code = room_code_from_node_id(&opener_id);
+
+    // The room code is the opener's full encoded node ID. Both the opener
+    // and every joiner derive the same topic and encryption key from it.
+    let room_code = encode_node_id(&opener_id);
     let topic = topic_for(&format!("starling/flock/{room_code}"));
     let crypto = FlockCrypto::from_room_code(&room_code);
 
-    let ticket = encode_node_id(&my_node_id);
-    crate::logger::warn(&format!(
-        "endpoint bound: room_code={} ticket={}",
-        room_code, ticket
-    ));
-    let _ = evt_tx.send(AppEvent::Ticket(ticket));
+    let my_code = encode_node_id(&my_node_id);
+    crate::logger::warn(&format!("endpoint bound: room_code={my_code}"));
+    let _ = evt_tx.send(AppEvent::Ticket(my_code));
 
     let gossip = Gossip::builder().spawn(endpoint.clone());
 

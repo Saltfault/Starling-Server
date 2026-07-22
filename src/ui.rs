@@ -21,9 +21,8 @@ pub struct App {
     pub peers: Vec<EndpointId>,
     /// Index into `peers` of the currently highlighted peer.
     pub selected_peer: usize,
-    /// Room/invite code shown in the invite popup.
-    pub invite: Option<String>,
-    /// This node's full encoded node ID (source of the color code).
+    /// The room code / invite: the flock opener's full encoded node ID.
+    /// This is both displayed in the header and what peers join with.
     pub node_id: Option<String>,
     /// Whether the invite popup is currently displayed.
     pub show_invite: bool,
