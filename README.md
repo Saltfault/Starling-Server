@@ -31,6 +31,17 @@ that installs the ALSA→PulseAudio bridge. See
 cargo install --git https://forgejo.hearthhome.lol/Saltfault/Starling.git
 ```
 
+**Configure your profile (one-time):**
+
+```bash
+starling setup
+```
+
+This opens a setup wizard where you enter your display name, select your
+microphone and speaker, and get a 32-digit profile code. The code encodes
+your name and can be used to restore your profile on another machine. The
+profile is saved to disk automatically.
+
 **Run it:**
 
 ```bash
@@ -44,8 +55,9 @@ they join with:
 starling join BIRD00CCFF
 ```
 
-When the app starts, a popup asks for your display name. Type it and press
-Enter.
+If you haven't run `starling setup` yet, a popup will ask for your display
+name on first launch. Run `starling setup` later to change your name or audio
+devices.
 
 > **Developing?** You can also clone and run from source:
 > ```bash
@@ -313,13 +325,16 @@ working.
 
 | File | Responsibility |
 |------|---------------|
-| `main.rs` | Event loop, keyboard handling, wires everything together |
+| `main.rs` | Event loop, keyboard handling, subcommand dispatch |
 | `event.rs` | `Command` (UI→net) and `AppEvent` (net→UI) types |
 | `net.rs` | Owns the iroh endpoint, gossip subscription, voice handler |
 | `call.rs` | Opens/accepts QUIC streams for voice datagrams |
 | `voice.rs` | Mic capture: cpal input → Opus encoder → channel |
 | `playback.rs` | Audio output: channel → Opus decoder → ring buffer → cpal output |
 | `ui.rs` | Terminal rendering and UI state (`App` struct) |
+| `setup.rs` | Setup wizard TUI for profile configuration |
+| `config.rs` | Profile struct, disk persistence, 32-digit code encode/decode |
+| `crypto.rs` | E2E encryption (ChaCha20-Poly1305) for gossip messages |
 | `logger.rs` | File logger with gzipped log rotation |
 | `util.rs` | Platform utilities (stderr suppression on Unix) |
 
@@ -342,6 +357,10 @@ node discovery. No central server coordinates them:
 Audio is encoded as 48 kHz mono Opus, 20 ms frames (960 samples per frame),
 sent as QUIC datagrams. Playback uses a 2-second ring buffer to absorb
 network jitter.
+
+All text messages are end-to-end encrypted with ChaCha20-Poly1305 using a
+key derived from the room code. Voice calls are E2E encrypted via iroh's
+QUIC TLS 1.3. Relays and intermediaries cannot read message content.
 
 ---
 
