@@ -44,32 +44,46 @@ impl App {
 
 pub fn draw(f: &mut Frame, app: &App) {
     let chunks = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Min(1),
-        Constraint::Length(1),
-        Constraint::Length(3),
+        Constraint::Length(2), // header: swatches + full code
+        Constraint::Min(1),    // messages + birds panel
+        Constraint::Length(1), // call status
+        Constraint::Length(3), // input
     ])
     .split(f.area());
 
-    // ── Header ────────────────────────────────────────────────────────
-    let room_code = app.invite.as_deref().unwrap_or("waiting for endpoint...");
+    // ── Header: all color swatches + full code ────────────────────────
+    let header = Layout::vertical([
+        Constraint::Length(1), // swatches
+        Constraint::Length(1), // code text
+    ])
+    .split(chunks[0]);
 
-    let mut header_spans: Vec<Span> = Vec::new();
+    let full_code = app.node_id.as_deref().unwrap_or("");
+    let colors = parse_color_code(full_code);
 
-    if let Some((r, g, b)) = first_color(room_code) {
-        let full = Color::Rgb(r, g, b);
+    // Row 1: swatches (one ▀▄ pair per color)
+    let mut swatch_spans: Vec<Span> = Vec::new();
+    for (r, g, b) in &colors {
+        let full = Color::Rgb(*r, *g, *b);
         let half = Color::Rgb(r / 2, g / 2, b / 2);
-        header_spans.push(Span::styled("\u{2580}", Style::new().fg(full).bg(half)));
-        header_spans.push(Span::styled("\u{2584}", Style::new().fg(full).bg(half)));
-        header_spans.push(Span::raw(" "));
+        swatch_spans.push(Span::styled("\u{2580}", Style::new().fg(full).bg(half)));
+        swatch_spans.push(Span::styled("\u{2584}", Style::new().fg(full).bg(half)));
+        swatch_spans.push(Span::raw(" "));
     }
+    if swatch_spans.is_empty() {
+        // No code yet — show waiting text
+        swatch_spans.push(Span::styled(
+            " waiting for endpoint...",
+            Style::new().fg(Color::DarkGray),
+        ));
+    }
+    f.render_widget(Line::from(swatch_spans), header[0]);
 
-    header_spans.push(Span::styled(
-        format!(" {} ", room_code),
-        Style::new().fg(Color::DarkGray),
-    ));
-
-    f.render_widget(Line::from(header_spans), chunks[0]);
+    // Row 2: the full code
+    f.render_widget(
+        Paragraph::new(format!(" {}", full_code)).style(Style::new().fg(Color::DarkGray)),
+        header[1],
+    );
 
     // ── Messages + Birds panel ────────────────────────────────────────
     let middle = Layout::horizontal([Constraint::Min(1), Constraint::Length(24)]).split(chunks[1]);
@@ -151,10 +165,9 @@ fn draw_invite_popup(f: &mut Frame, app: &App) {
     let code = app.node_id.as_deref().unwrap_or("waiting for endpoint...");
     let colors = parse_color_code(code);
 
-    // Size the popup based on the number of color swatches.
-    let swatch_line_len = colors.len() * 3; // "▀▄ " per color
+    let swatch_line_len = colors.len() * 3;
     let code_len = code.len();
-    let content_width = swatch_line_len.max(code_len).max(40) + 4; // padding
+    let content_width = swatch_line_len.max(code_len).max(40) + 4;
     let width = content_width.min(area.width as usize) as u16;
     let height = 12.min(area.height);
 
@@ -177,20 +190,20 @@ fn draw_invite_popup(f: &mut Frame, app: &App) {
     });
 
     let chunks = Layout::vertical([
-        Constraint::Length(1), // blank
-        Constraint::Length(1), // swatches
-        Constraint::Length(1), // blank
-        Constraint::Length(1), // code line 1
-        Constraint::Length(1), // code line 2 (if wrapped)
-        Constraint::Length(1), // blank
-        Constraint::Length(1), // "they join with:"
-        Constraint::Length(1), // join command
-        Constraint::Length(1), // blank
-        Constraint::Length(1), // close hint
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
     ])
     .split(inner);
 
-    // ── Color swatches: one ▀▄ pair per color ────────────────────────
+    // Swatches
     let mut swatch_spans: Vec<Span> = Vec::new();
     for (r, g, b) in &colors {
         let full = Color::Rgb(*r, *g, *b);
@@ -201,10 +214,9 @@ fn draw_invite_popup(f: &mut Frame, app: &App) {
     }
     f.render_widget(Line::from(swatch_spans), chunks[1]);
 
-    // ── Code text (split across two lines if long) ────────────────────
+    // Code (split across two lines if long)
     let mid = code.len() / 2;
     let (code1, code2) = if code.len() > 40 {
-        // Try to split at a dash boundary near the middle.
         let split = code[mid..].find('-').map(|i| mid + i).unwrap_or(mid);
         (&code[..split], &code[split..])
     } else {
@@ -222,7 +234,6 @@ fn draw_invite_popup(f: &mut Frame, app: &App) {
         );
     }
 
-    // ── Join instructions ─────────────────────────────────────────────
     f.render_widget(Paragraph::new("They join with:"), chunks[6]);
     f.render_widget(
         Paragraph::new("  starling join <code>").style(Style::new().fg(Color::Yellow)),
@@ -232,18 +243,6 @@ fn draw_invite_popup(f: &mut Frame, app: &App) {
         Paragraph::new("  Press i or Esc to close").style(Style::new().fg(Color::DarkGray)),
         chunks[9],
     );
-}
-
-/// Parse the first RRGGBB color from a room code like "BIRD00CCFF".
-fn first_color(code: &str) -> Option<(u8, u8, u8)> {
-    let hex = code.strip_prefix("BIRD")?;
-    if hex.len() < 6 {
-        return None;
-    }
-    let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
-    let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
-    let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
-    Some((r, g, b))
 }
 
 /// Parse a full color code like "BIRD-00CCFF-12AB34-..." into a list of
