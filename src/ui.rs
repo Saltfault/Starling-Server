@@ -1,5 +1,4 @@
-//! UI state and rendering. The [`App`] struct holds all mutable state that
-//! the terminal loop reads and writes. The [`draw`] function renders it.
+//! UI state and rendering.
 
 use crate::event::ChatMessage;
 use iroh::{EndpointAddr, EndpointId};
@@ -7,8 +6,8 @@ use ratatui::{
     prelude::*,
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
 };
+use std::collections::HashMap;
 
-/// All mutable UI state.
 #[derive(Default)]
 pub struct App {
     pub name: String,
@@ -17,11 +16,12 @@ pub struct App {
     pub peers: Vec<EndpointId>,
     pub selected_peer: usize,
     pub invite: Option<String>,
-    /// Full invite code (BIRD-RRGGBB-RRGGBB-... format).
     pub node_id: Option<String>,
     pub show_invite: bool,
     pub in_call: bool,
     pub muted: bool,
+    /// Maps peer EndpointId → display name (from profile announcements).
+    pub peer_names: HashMap<EndpointId, String>,
 }
 
 impl App {
@@ -40,28 +40,31 @@ impl App {
             .get(self.selected_peer)
             .map(|id| EndpointAddr::from(*id))
     }
+
+    /// Get the display name for a peer, or fall back to the short node ID.
+    pub fn peer_display_name(&self, id: &EndpointId) -> String {
+        self.peer_names
+            .get(id)
+            .cloned()
+            .unwrap_or_else(|| id.fmt_short().to_string())
+    }
 }
 
 pub fn draw(f: &mut Frame, app: &App) {
     let chunks = Layout::vertical([
-        Constraint::Length(2), // header: swatches + full code
-        Constraint::Min(1),    // messages + birds panel
-        Constraint::Length(1), // call status
-        Constraint::Length(3), // input
+        Constraint::Length(2),
+        Constraint::Min(1),
+        Constraint::Length(1),
+        Constraint::Length(3),
     ])
     .split(f.area());
 
     // ── Header: all color swatches + full code ────────────────────────
-    let header = Layout::vertical([
-        Constraint::Length(1), // swatches
-        Constraint::Length(1), // code text
-    ])
-    .split(chunks[0]);
+    let header = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(chunks[0]);
 
     let full_code = app.node_id.as_deref().unwrap_or("");
     let colors = parse_color_code(full_code);
 
-    // Row 1: swatches (one ▀▄ pair per color)
     let mut swatch_spans: Vec<Span> = Vec::new();
     for (r, g, b) in &colors {
         let full = Color::Rgb(*r, *g, *b);
@@ -71,7 +74,6 @@ pub fn draw(f: &mut Frame, app: &App) {
         swatch_spans.push(Span::raw(" "));
     }
     if swatch_spans.is_empty() {
-        // No code yet — show waiting text
         swatch_spans.push(Span::styled(
             " waiting for endpoint...",
             Style::new().fg(Color::DarkGray),
@@ -79,7 +81,6 @@ pub fn draw(f: &mut Frame, app: &App) {
     }
     f.render_widget(Line::from(swatch_spans), header[0]);
 
-    // Row 2: the full code
     f.render_widget(
         Paragraph::new(format!(" {}", full_code)).style(Style::new().fg(Color::DarkGray)),
         header[1],
@@ -111,7 +112,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         middle[0],
     );
 
-    // Birds panel
+    // Birds panel — local user first, then remote peers with names.
     let mut peer_items: Vec<ListItem> = Vec::new();
     peer_items.push(ListItem::new(Line::from(vec![
         Span::raw("  "),
@@ -123,7 +124,8 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     for (i, id) in app.peers.iter().enumerate() {
         let prefix = if i == app.selected_peer { "> " } else { "  " };
-        peer_items.push(ListItem::new(format!("{prefix}{}", id.fmt_short())));
+        let display = app.peer_display_name(id);
+        peer_items.push(ListItem::new(format!("{prefix}{display}")));
     }
 
     f.render_widget(
@@ -203,7 +205,6 @@ fn draw_invite_popup(f: &mut Frame, app: &App) {
     ])
     .split(inner);
 
-    // Swatches
     let mut swatch_spans: Vec<Span> = Vec::new();
     for (r, g, b) in &colors {
         let full = Color::Rgb(*r, *g, *b);
@@ -214,7 +215,6 @@ fn draw_invite_popup(f: &mut Frame, app: &App) {
     }
     f.render_widget(Line::from(swatch_spans), chunks[1]);
 
-    // Code (split across two lines if long)
     let mid = code.len() / 2;
     let (code1, code2) = if code.len() > 40 {
         let split = code[mid..].find('-').map(|i| mid + i).unwrap_or(mid);
@@ -245,8 +245,6 @@ fn draw_invite_popup(f: &mut Frame, app: &App) {
     );
 }
 
-/// Parse a full color code like "BIRD-00CCFF-12AB34-..." into a list of
-/// (R, G, B) tuples — one per color group.
 fn parse_color_code(code: &str) -> Vec<(u8, u8, u8)> {
     let mut colors = Vec::new();
     for group in code.split('-') {

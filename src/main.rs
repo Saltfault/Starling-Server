@@ -1,13 +1,4 @@
-//! Starling — a federated p2p communications platform where peers, known as
-//! birds, communicate via the murmuration.
-//!
-//! Subcommands:
-//! - `starling setup` — configure profile (name, audio devices, code)
-//! - `starling open`  — start a new flock
-//! - `starling join <code>` — join an existing flock
-//!
-//! If no profile exists, `open` and `join` automatically run the setup wizard.
-//! Press `i` in the chat to view the invite code.
+//! Starling — a federated p2p communications platform.
 
 mod call;
 mod config;
@@ -39,7 +30,6 @@ async fn main() -> anyhow::Result<()> {
 
     let args: Vec<String> = std::env::args().collect();
 
-    // ── Subcommand: `starling setup` ──────────────────────────────────
     if args.get(1).map(String::as_str) == Some("setup") {
         enable_raw_mode()?;
         let mut stdout = std::io::stdout();
@@ -51,15 +41,13 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // ── Subcommand: `starling open` or `starling join <code>` ──────
-    // The join code is a base58-encoded node ID (~44 chars).
     let bootstrap = match args.get(1).map(String::as_str) {
         Some("join") => {
             let code = &args[2];
             match net::decode_node_id(code) {
                 Some(node_id) => vec![node_id],
                 None => {
-                    eprintln!("Invalid join code. Make sure you copied it correctly.");
+                    eprintln!("Invalid join code.");
                     return Ok(());
                 }
             }
@@ -75,13 +63,14 @@ async fn main() -> anyhow::Result<()> {
     let mut term = ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(stdout))?;
     let mut app = App::default();
 
-    // For "join", derive the room code from the opener's node ID immediately.
+    // For "join": set both the room code AND the full color code from
+    // the opener's node ID immediately (so the joiner sees the same
+    // colors and code as the opener).
     if let Some(node_id) = bootstrap.first() {
         app.invite = Some(net::room_code_from_node_id(node_id));
+        app.node_id = Some(net::encode_node_id(node_id));
     }
 
-    // Get name and device preferences. If a profile exists, use it.
-    // If not, run the setup wizard.
     let (name, input_device, output_device) = if let Some(p) = &profile {
         app.name = p.name.clone();
         (
@@ -107,7 +96,6 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    // Start the network task.
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<Command>();
     let (evt_tx, mut evt_rx) = mpsc::unbounded_channel::<AppEvent>();
     let muted_flag = Arc::new(AtomicBool::new(false));
@@ -129,7 +117,6 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    // Main chat loop.
     loop {
         term.draw(|f| ui::draw(f, &app))?;
 
@@ -143,19 +130,24 @@ async fn main() -> anyhow::Result<()> {
                 }
                 AppEvent::PeerDisconnected(id) => {
                     app.peers.retain(|p| p != &id);
+                    app.peer_names.remove(&id);
                     if !app.peers.is_empty() {
                         app.selected_peer %= app.peers.len();
                     } else {
                         app.selected_peer = 0;
                     }
                 }
-                AppEvent::Ticket(code) => {
-                    // For "open": this is our base58-encoded node ID.
-                    // Derive the room code from it for display.
+                AppEvent::PeerNamed(id, name) => {
+                    app.peer_names.insert(id, name);
+                }
+                AppEvent::Ticket(node_id_str) => {
+                    // For "open": derive room code and color code from our
+                    // own node ID. For "join": already set from the opener's
+                    // node ID, so skip.
                     if app.invite.is_none() {
-                        if let Some(node_id) = net::decode_node_id(&code) {
+                        if let Some(node_id) = net::decode_node_id(&node_id_str) {
                             app.invite = Some(net::room_code_from_node_id(&node_id));
-                            app.node_id = Some(code);
+                            app.node_id = Some(node_id_str);
                         }
                     }
                 }

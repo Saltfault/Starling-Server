@@ -6,7 +6,7 @@
 //! E2E encrypted via iroh's QUIC TLS 1.3.
 
 use crate::crypto::FlockCrypto;
-use crate::event::{AppEvent, ChatMessage, Command};
+use crate::event::{AppEvent, ChatMessage, Command, GossipPayload};
 use iroh::{
     Endpoint, EndpointId,
     endpoint::{Connection, presets},
@@ -22,27 +22,20 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use tokio::sync::mpsc;
 
-/// Derive a stable 32-byte [`TopicId`] from a human-readable name by hashing
-/// it with SHA-256.
 pub fn topic_for(name: &str) -> TopicId {
     use sha2::{Digest, Sha256};
     let hash = Sha256::digest(name.as_bytes());
     TopicId::from_bytes(hash.into())
 }
 
-/// Derive a short room code from a node ID: "BIRD" + first 6 hex chars.
-/// This is the first color group of the full invite code.
 pub fn room_code_from_node_id(node_id: &EndpointId) -> String {
     let bytes = node_id.as_bytes();
     let hex: String = (0..3).map(|i| format!("{:02X}", bytes[i])).collect();
     format!("BIRD{hex}")
 }
 
-/// Encode a 32-byte node ID as a string of hex color codes:
-/// `BIRD-RRGGBB-RRGGBB-...` (11 groups, last group zero-padded).
 pub fn encode_node_id(node_id: &EndpointId) -> String {
     let bytes = node_id.as_bytes();
-    // Pad to a multiple of 3 so every group is a full RGB triple.
     let mut padded = bytes.to_vec();
     while padded.len() % 3 != 0 {
         padded.push(0);
@@ -54,7 +47,6 @@ pub fn encode_node_id(node_id: &EndpointId) -> String {
     format!("BIRD-{}", colors.join("-"))
 }
 
-/// Decode a `BIRD-RRGGBB-RRGGBB-...` string back into an EndpointId.
 pub fn decode_node_id(code: &str) -> Option<EndpointId> {
     let code = code
         .strip_prefix("BIRD-")
@@ -78,7 +70,18 @@ pub fn decode_node_id(code: &str) -> Option<EndpointId> {
     EndpointId::from_bytes(&arr).ok()
 }
 
-/// The main network loop. Spawned once by `main`.
+/// Helper: encrypt, serialize, and broadcast a gossip payload.
+async fn broadcast_payload(
+    sender: &iroh_gossip::api::GossipSender,
+    crypto: &FlockCrypto,
+    payload: &GossipPayload,
+) -> anyhow::Result<()> {
+    let plaintext = postcard::to_stdvec(payload)?;
+    let ciphertext = crypto.encrypt(&plaintext);
+    sender.broadcast(ciphertext.into()).await?;
+    Ok(())
+}
+
 pub async fn run(
     bootstrap: Vec<EndpointId>,
     mut cmd_rx: mpsc::UnboundedReceiver<Command>,
@@ -133,9 +136,7 @@ pub async fn run(
                         body: text,
                         ts: chrono::Utc::now().timestamp_millis(),
                     };
-                    let plaintext = postcard::to_stdvec(&msg)?;
-                    let ciphertext = crypto.encrypt(&plaintext);
-                    sender.broadcast(ciphertext.into()).await?;
+                    broadcast_payload(&sender, &crypto, &GossipPayload::Chat(msg.clone())).await?;
                     let _ = evt_tx.send(AppEvent::Message(msg));
                 }
 
@@ -159,14 +160,30 @@ pub async fn run(
                 match event {
                     Ok(Event::Received(msg)) => {
                         if let Some(plaintext) = crypto.decrypt(&msg.content) {
-                            if let Ok(m) = postcard::from_bytes::<ChatMessage>(&plaintext) {
-                                let _ = evt_tx.send(AppEvent::Message(m));
+                            match postcard::from_bytes::<GossipPayload>(&plaintext) {
+                                Ok(GossipPayload::Chat(m)) => {
+                                    let _ = evt_tx.send(AppEvent::Message(m));
+                                }
+                                Ok(GossipPayload::Profile { id, name }) => {
+                                    let _ = evt_tx.send(AppEvent::PeerNamed(id, name));
+                                }
+                                Err(e) => {
+                                    crate::logger::error(&format!("gossip deserialize error: {e}"));
+                                }
                             }
                         }
                     }
                     Ok(Event::NeighborUp(id)) => {
                         crate::logger::warn(&format!("neighbor up: {}", id));
                         let _ = evt_tx.send(AppEvent::PeerConnected(id));
+                        // Announce our profile to the new peer.
+                        let payload = GossipPayload::Profile {
+                            id: my_node_id,
+                            name: name.clone(),
+                        };
+                        if let Err(e) = broadcast_payload(&sender, &crypto, &payload).await {
+                            crate::logger::error(&format!("profile broadcast failed: {e}"));
+                        }
                     }
                     Ok(Event::NeighborDown(id)) => {
                         crate::logger::warn(&format!("neighbor down: {}", id));
