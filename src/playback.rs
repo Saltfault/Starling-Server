@@ -6,11 +6,10 @@
 //! played.
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use opus::{Channels, Decoder};
+use opus::{Decoder, DecoderConfig};
 use ringbuf::{CachingCons, CachingProd, SharedRb, storage::Heap, traits::*};
 
 const SAMPLE_RATE: u32 = 48_000;
-const FRAME: usize = 960;
 const BUFFER_CAPACITY: usize = SAMPLE_RATE as usize * 2;
 
 type Prod = CachingProd<std::sync::Arc<SharedRb<Heap<f32>>>>;
@@ -34,7 +33,6 @@ impl Playback {
     fn new_inner(device_name: Option<&str>) -> anyhow::Result<Self> {
         let host = cpal::default_host();
 
-        // Try to find the named device, fall back to system default.
         let device = if let Some(name) = device_name {
             let mut found = None;
             if let Ok(devices) = host.output_devices() {
@@ -75,7 +73,7 @@ impl Playback {
         )?;
 
         stream.play()?;
-        let decoder = Decoder::new(SAMPLE_RATE, Channels::Mono)?;
+        let decoder = Decoder::new(DecoderConfig::new(SAMPLE_RATE, 1))?;
 
         Ok(Self {
             decoder,
@@ -85,10 +83,9 @@ impl Playback {
     }
 
     pub fn push_opus(&mut self, bytes: &[u8]) {
-        let mut pcm = [0f32; FRAME];
-        match self.decoder.decode_float(bytes, &mut pcm, false) {
-            Ok(n) => {
-                self.producer.push_slice(&pcm[..n]);
+        match self.decoder.decode_f32(bytes) {
+            Ok(pcm) => {
+                self.producer.push_slice(&pcm);
             }
             Err(e) => crate::logger::error(&format!("opus decode error: {e}")),
         }
