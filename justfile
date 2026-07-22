@@ -50,10 +50,8 @@ setup-wsl-audio:
     sudo apt-get update && sudo apt-get install -y libasound2-plugins
 
     echo "Writing /etc/asound.conf..."
-    sudo tee /etc/asound.conf > /dev/null << 'ASOUNDCONF'
-pcm.!default pulse
-ctl.!default pulse
-ASOUNDCONF
+    echo 'pcm.!default pulse' | sudo tee /etc/asound.conf > /dev/null
+    echo 'ctl.!default pulse' | sudo tee -a /etc/asound.conf > /dev/null
 
     echo ""
     echo "Done! Voice calls should now work."
