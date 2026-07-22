@@ -126,6 +126,7 @@ unsafe impl Send for Decoder {}
 
 /// Channel count.
 #[derive(Clone, Copy)]
+#[allow(dead_code)]
 pub enum Channels {
     Mono = 1,
     Stereo = 2,

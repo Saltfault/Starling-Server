@@ -21,6 +21,7 @@ use crossterm::{
 use event::{AppEvent, Command};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use ui::App;
 
@@ -114,6 +115,10 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    // Track the last key event to deduplicate on Windows (where crossterm
+    // can emit two Press events for a single key: key-down + character).
+    let mut last_key: Option<(KeyCode, Instant)> = None;
+
     loop {
         term.draw(|f| ui::draw(f, &app))?;
 
@@ -160,6 +165,15 @@ async fn main() -> anyhow::Result<()> {
                 if k.kind != KeyEventKind::Press {
                     continue;
                 }
+
+                // Deduplicate: skip if the same key code arrives within
+                // 30ms (Windows can emit two Press events per key press).
+                if let Some((prev_code, prev_time)) = &last_key {
+                    if *prev_code == k.code && prev_time.elapsed() < Duration::from_millis(30) {
+                        continue;
+                    }
+                }
+                last_key = Some((k.code, Instant::now()));
 
                 if app.show_invite {
                     match k.code {
@@ -208,7 +222,7 @@ async fn main() -> anyhow::Result<()> {
 
                     KeyCode::Esc => {
                         let _ = cmd_tx.send(Command::Quit);
-                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                        tokio::time::sleep(Duration::from_millis(500)).await;
                         break;
                     }
 

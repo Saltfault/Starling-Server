@@ -21,6 +21,7 @@ use ratatui::{
     prelude::*,
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
 };
+use std::time::{Duration, Instant};
 
 /// Which step of the setup wizard we're on.
 enum Phase {
@@ -217,6 +218,7 @@ pub fn run_setup(
     term: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
 ) -> anyhow::Result<Option<Profile>> {
     let mut app = SetupApp::new();
+    let mut last_key: Option<(KeyCode, Instant)> = None;
 
     loop {
         term.draw(|f| draw(f, &app))?;
@@ -228,6 +230,12 @@ pub fn run_setup(
             if k.kind != KeyEventKind::Press {
                 continue;
             }
+            if let Some((p, t)) = last_key {
+                if p == k.code && t.elapsed() < Duration::from_millis(30) {
+                    continue;
+                }
+            }
+            last_key = Some((k.code, Instant::now()));
             match app.phase {
                 Phase::DependencyCheck => match k.code {
                     KeyCode::Enter => {
