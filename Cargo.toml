@@ -1,5 +1,5 @@
 [package]
-name = "Starling"
+name = "Starling-TUI"
 version = "0.3.15"
 edition = "2024"
 
