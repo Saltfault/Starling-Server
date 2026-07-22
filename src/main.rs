@@ -7,7 +7,7 @@
 //! - `starling join <node-id>` — join an existing flock
 //!
 //! If no profile exists, `open` and `join` automatically run the setup wizard
-//! before entering the chat.
+//! before entering the chat. Press `i` in the chat to view the invite ticket.
 
 mod call;
 mod config;
@@ -59,10 +59,8 @@ async fn main() -> anyhow::Result<()> {
         _ => vec![],
     };
 
-    // Load profile from disk.
     let profile = config::Profile::load();
 
-    // Set up the terminal.
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -73,12 +71,12 @@ async fn main() -> anyhow::Result<()> {
     if let Some(node_id_str) = args.get(2) {
         if let Ok(node_id) = node_id_str.parse::<iroh::EndpointId>() {
             app.invite = Some(net::room_code_from_node_id(&node_id));
+            app.node_id = Some(node_id_str.clone());
         }
     }
 
-    // Get the user's name and device preferences. If a profile exists, use
-    // it directly. If not, run the setup wizard (which saves the profile
-    // to disk for next time).
+    // Get name and device preferences. If a profile exists, use it.
+    // If not, run the setup wizard.
     let (name, input_device, output_device) = if let Some(p) = &profile {
         app.name = p.name.clone();
         (
@@ -87,7 +85,6 @@ async fn main() -> anyhow::Result<()> {
             p.output_device.clone(),
         )
     } else {
-        // No profile — run the setup wizard.
         match setup::run_setup(&mut term)? {
             Some(p) => {
                 app.name = p.name.clone();
@@ -98,7 +95,6 @@ async fn main() -> anyhow::Result<()> {
                 )
             }
             None => {
-                // User cancelled setup — exit.
                 disable_raw_mode()?;
                 execute!(term.backend_mut(), LeaveAlternateScreen)?;
                 return Ok(());
@@ -106,8 +102,7 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    // Start the network task. The topic, room code, and E2E key are all
-    // derived inside net::run from the opener's node ID.
+    // Start the network task.
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<Command>();
     let (evt_tx, mut evt_rx) = mpsc::unbounded_channel::<AppEvent>();
     let muted_flag = Arc::new(AtomicBool::new(false));
@@ -150,10 +145,11 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
                 AppEvent::Ticket(node_id_str) => {
-                    // For "open": derive the room code from our own node ID.
+                    // For "open": derive room code from our own node ID.
                     if app.invite.is_none() {
                         if let Ok(node_id) = node_id_str.parse::<iroh::EndpointId>() {
                             app.invite = Some(net::room_code_from_node_id(&node_id));
+                            app.node_id = Some(node_id_str);
                         }
                     }
                 }
@@ -167,10 +163,25 @@ async fn main() -> anyhow::Result<()> {
 
         if ct_event::poll(std::time::Duration::from_millis(50))? {
             if let Event::Key(k) = ct_event::read()? {
+                // If the invite popup is open, `i` and Esc close it.
+                if app.show_invite {
+                    match k.code {
+                        KeyCode::Char('i') | KeyCode::Esc => {
+                            app.show_invite = false;
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
+
                 match k.code {
                     KeyCode::Enter if !app.input.is_empty() => {
                         let text = std::mem::take(&mut app.input);
                         let _ = cmd_tx.send(Command::SendText(text));
+                    }
+
+                    KeyCode::Char('i') => {
+                        app.show_invite = true;
                     }
 
                     KeyCode::Char('k') if k.modifiers.contains(KeyModifiers::CONTROL) => {
