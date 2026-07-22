@@ -4,10 +4,10 @@
 //! Subcommands:
 //! - `starling setup` — configure profile (name, audio devices, code)
 //! - `starling open`  — start a new flock
-//! - `starling join <node-id>` — join an existing flock
+//! - `starling join <code>` — join an existing flock
 //!
-//! If no profile exists, `open` and `join` automatically run the setup wizard
-//! before entering the chat. Press `i` in the chat to view the invite ticket.
+//! If no profile exists, `open` and `join` automatically run the setup wizard.
+//! Press `i` in the chat to view the invite code.
 
 mod call;
 mod config;
@@ -50,11 +50,18 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // ── Subcommand: `starling open` or `starling join <node-id>` ──────
+    // ── Subcommand: `starling open` or `starling join <code>` ──────
+    // The join code is a base58-encoded node ID (~44 chars).
     let bootstrap = match args.get(1).map(String::as_str) {
         Some("join") => {
-            let node_id: iroh::EndpointId = args[2].parse()?;
-            vec![node_id]
+            let code = &args[2];
+            match net::decode_node_id(code) {
+                Some(node_id) => vec![node_id],
+                None => {
+                    eprintln!("Invalid join code. Make sure you copied it correctly.");
+                    return Ok(());
+                }
+            }
         }
         _ => vec![],
     };
@@ -68,11 +75,8 @@ async fn main() -> anyhow::Result<()> {
     let mut app = App::default();
 
     // For "join", derive the room code from the opener's node ID immediately.
-    if let Some(node_id_str) = args.get(2) {
-        if let Ok(node_id) = node_id_str.parse::<iroh::EndpointId>() {
-            app.invite = Some(net::room_code_from_node_id(&node_id));
-            app.node_id = Some(node_id_str.clone());
-        }
+    if let Some(node_id) = bootstrap.first() {
+        app.invite = Some(net::room_code_from_node_id(node_id));
     }
 
     // Get name and device preferences. If a profile exists, use it.
@@ -144,12 +148,13 @@ async fn main() -> anyhow::Result<()> {
                         app.selected_peer = 0;
                     }
                 }
-                AppEvent::Ticket(node_id_str) => {
-                    // For "open": derive room code from our own node ID.
+                AppEvent::Ticket(code) => {
+                    // For "open": this is our base58-encoded node ID.
+                    // Derive the room code from it for display.
                     if app.invite.is_none() {
-                        if let Ok(node_id) = node_id_str.parse::<iroh::EndpointId>() {
+                        if let Some(node_id) = net::decode_node_id(&code) {
                             app.invite = Some(net::room_code_from_node_id(&node_id));
-                            app.node_id = Some(node_id_str);
+                            app.node_id = Some(code);
                         }
                     }
                 }
@@ -163,7 +168,6 @@ async fn main() -> anyhow::Result<()> {
 
         if ct_event::poll(std::time::Duration::from_millis(50))? {
             if let Event::Key(k) = ct_event::read()? {
-                // If the invite popup is open, `i` and Esc close it.
                 if app.show_invite {
                     match k.code {
                         KeyCode::Char('i') | KeyCode::Esc => {

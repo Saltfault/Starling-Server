@@ -11,31 +11,20 @@ use ratatui::{
 /// All mutable UI state.
 #[derive(Default)]
 pub struct App {
-    /// The bird's display name (from profile).
     pub name: String,
-    /// Chat messages received (and echoed from our own broadcasts).
     pub messages: Vec<ChatMessage>,
-    /// Current text input buffer.
     pub input: String,
-    /// Connected peer IDs (from gossip neighbor-up/down events).
     pub peers: Vec<EndpointId>,
-    /// Index into `peers` for the currently selected peer (for calling).
     pub selected_peer: usize,
-    /// Room code shown in the header (e.g. "BIRD00CCFF").
     pub invite: Option<String>,
-    /// Full node ID — the invite ticket. Shown in a popup when the user
-    /// presses `i`.
+    /// Full invite code (BIRD-RRGGBB-RRGGBB-... format).
     pub node_id: Option<String>,
-    /// Whether the invite popup is currently shown.
     pub show_invite: bool,
-    /// Whether we are currently in a call.
     pub in_call: bool,
-    /// Whether the mic is muted (display state).
     pub muted: bool,
 }
 
 impl App {
-    /// Total bird count including ourselves.
     pub fn bird_count(&self) -> usize {
         self.peers.len() + 1
     }
@@ -53,22 +42,21 @@ impl App {
     }
 }
 
-/// Render the chat UI (and optionally the invite popup).
 pub fn draw(f: &mut Frame, app: &App) {
     let chunks = Layout::vertical([
-        Constraint::Length(1), // header
-        Constraint::Min(1),    // messages + birds panel
-        Constraint::Length(1), // call status
-        Constraint::Length(3), // input
+        Constraint::Length(1),
+        Constraint::Min(1),
+        Constraint::Length(1),
+        Constraint::Length(3),
     ])
     .split(f.area());
 
-    // ── Header: color swatch + room code ───────────────────────────────
+    // ── Header ────────────────────────────────────────────────────────
     let room_code = app.invite.as_deref().unwrap_or("waiting for endpoint...");
 
     let mut header_spans: Vec<Span> = Vec::new();
 
-    if let Some((r, g, b)) = room_code_rgb(room_code) {
+    if let Some((r, g, b)) = first_color(room_code) {
         let full = Color::Rgb(r, g, b);
         let half = Color::Rgb(r / 2, g / 2, b / 2);
         header_spans.push(Span::styled("\u{2580}", Style::new().fg(full).bg(half)));
@@ -109,19 +97,16 @@ pub fn draw(f: &mut Frame, app: &App) {
         middle[0],
     );
 
-    // Birds panel — shows the local user first, then remote peers.
+    // Birds panel
     let mut peer_items: Vec<ListItem> = Vec::new();
-
-    // Local user (always first, highlighted differently).
     peer_items.push(ListItem::new(Line::from(vec![
-        Span::styled("  ", Style::new()),
+        Span::raw("  "),
         Span::styled(
             format!("{} (you)", app.name),
             Style::new().fg(Color::Yellow).bold(),
         ),
     ])));
 
-    // Remote peers.
     for (i, id) in app.peers.iter().enumerate() {
         let prefix = if i == app.selected_peer { "> " } else { "  " };
         peer_items.push(ListItem::new(format!("{prefix}{}", id.fmt_short())));
@@ -153,7 +138,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         chunks[3],
     );
 
-    // ── Invite popup (toggled with `i`) ────────────────────────────────
+    // ── Invite popup ──────────────────────────────────────────────────
     if app.show_invite {
         draw_invite_popup(f, app);
     }
@@ -163,8 +148,16 @@ fn draw_invite_popup(f: &mut Frame, app: &App) {
     let area = f.area();
     f.render_widget(Clear, area);
 
-    let width = 60.min(area.width);
-    let height = 11.min(area.height);
+    let code = app.node_id.as_deref().unwrap_or("waiting for endpoint...");
+    let colors = parse_color_code(code);
+
+    // Size the popup based on the number of color swatches.
+    let swatch_line_len = colors.len() * 3; // "▀▄ " per color
+    let code_len = code.len();
+    let content_width = swatch_line_len.max(code_len).max(40) + 4; // padding
+    let width = content_width.min(area.width as usize) as u16;
+    let height = 12.min(area.height);
+
     let popup = Rect::new(
         area.x + (area.width.saturating_sub(width)) / 2,
         area.y + (area.height.saturating_sub(height)) / 2,
@@ -174,9 +167,7 @@ fn draw_invite_popup(f: &mut Frame, app: &App) {
 
     f.render_widget(Clear, popup);
     f.render_widget(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(" Invite Ticket "),
+        Block::default().borders(Borders::ALL).title(" Invite "),
         popup,
     );
 
@@ -185,40 +176,91 @@ fn draw_invite_popup(f: &mut Frame, app: &App) {
         horizontal: 2,
     });
 
-    let node_id = app.node_id.as_deref().unwrap_or("waiting for endpoint...");
+    let chunks = Layout::vertical([
+        Constraint::Length(1), // blank
+        Constraint::Length(1), // swatches
+        Constraint::Length(1), // blank
+        Constraint::Length(1), // code line 1
+        Constraint::Length(1), // code line 2 (if wrapped)
+        Constraint::Length(1), // blank
+        Constraint::Length(1), // "they join with:"
+        Constraint::Length(1), // join command
+        Constraint::Length(1), // blank
+        Constraint::Length(1), // close hint
+    ])
+    .split(inner);
 
-    let (line1, line2) = if node_id.len() > 32 {
-        (&node_id[..32], &node_id[32..])
+    // ── Color swatches: one ▀▄ pair per color ────────────────────────
+    let mut swatch_spans: Vec<Span> = Vec::new();
+    for (r, g, b) in &colors {
+        let full = Color::Rgb(*r, *g, *b);
+        let half = Color::Rgb(r / 2, g / 2, b / 2);
+        swatch_spans.push(Span::styled("\u{2580}", Style::new().fg(full).bg(half)));
+        swatch_spans.push(Span::styled("\u{2584}", Style::new().fg(full).bg(half)));
+        swatch_spans.push(Span::raw(" "));
+    }
+    f.render_widget(Line::from(swatch_spans), chunks[1]);
+
+    // ── Code text (split across two lines if long) ────────────────────
+    let mid = code.len() / 2;
+    let (code1, code2) = if code.len() > 40 {
+        // Try to split at a dash boundary near the middle.
+        let split = code[mid..].find('-').map(|i| mid + i).unwrap_or(mid);
+        (&code[..split], &code[split..])
     } else {
-        (node_id, "")
+        (code, "")
     };
 
-    let lines = vec![
-        Line::raw(""),
-        Line::raw("Share this with other birds:"),
-        Line::raw(""),
-        Line::from(vec![Span::styled(line1, Style::new().fg(Color::Green))]),
-        Line::from(vec![Span::styled(line2, Style::new().fg(Color::Green))]),
-        Line::raw(""),
-        Line::raw("They join with:"),
-        Line::styled("  starling join <ticket>", Style::new().fg(Color::Yellow)),
-        Line::raw(""),
-        Line::styled(
-            "  Press i or Esc to close",
-            Style::new().fg(Color::DarkGray),
-        ),
-    ];
+    f.render_widget(
+        Paragraph::new(code1).style(Style::new().fg(Color::Green)),
+        chunks[3],
+    );
+    if !code2.is_empty() {
+        f.render_widget(
+            Paragraph::new(code2).style(Style::new().fg(Color::Green)),
+            chunks[4],
+        );
+    }
 
-    f.render_widget(Paragraph::new(lines), inner);
+    // ── Join instructions ─────────────────────────────────────────────
+    f.render_widget(Paragraph::new("They join with:"), chunks[6]);
+    f.render_widget(
+        Paragraph::new("  starling join <code>").style(Style::new().fg(Color::Yellow)),
+        chunks[7],
+    );
+    f.render_widget(
+        Paragraph::new("  Press i or Esc to close").style(Style::new().fg(Color::DarkGray)),
+        chunks[9],
+    );
 }
 
-fn room_code_rgb(code: &str) -> Option<(u8, u8, u8)> {
+/// Parse the first RRGGBB color from a room code like "BIRD00CCFF".
+fn first_color(code: &str) -> Option<(u8, u8, u8)> {
     let hex = code.strip_prefix("BIRD")?;
-    if hex.len() != 6 {
+    if hex.len() < 6 {
         return None;
     }
     let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
     let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
     let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
     Some((r, g, b))
+}
+
+/// Parse a full color code like "BIRD-00CCFF-12AB34-..." into a list of
+/// (R, G, B) tuples — one per color group.
+fn parse_color_code(code: &str) -> Vec<(u8, u8, u8)> {
+    let mut colors = Vec::new();
+    for group in code.split('-') {
+        if group == "BIRD" || group.len() != 6 {
+            continue;
+        }
+        if let (Ok(r), Ok(g), Ok(b)) = (
+            u8::from_str_radix(&group[0..2], 16),
+            u8::from_str_radix(&group[2..4], 16),
+            u8::from_str_radix(&group[4..6], 16),
+        ) {
+            colors.push((r, g, b));
+        }
+    }
+    colors
 }
