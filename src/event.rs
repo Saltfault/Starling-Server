@@ -33,7 +33,12 @@ pub enum AppEvent {
     Ticket(String),
     /// A 20 ms Opus voice frame arrived.
     VoiceFrame(Vec<u8>),
+    /// A JPEG video frame arrived.
     VideoFrame(Vec<u8>),
+    /// A peer changed their presence status.
+    PeerStatus(EndpointId, BirdStatus),
+    /// A batch of recent chat messages (history sync).
+    HistoryChunk(Vec<ChatMessage>),
 }
 
 /// A chat message that travels over the gossip layer.
@@ -56,4 +61,14 @@ pub enum GossipPayload {
     Chat(ChatMessage),
     /// A peer announcing their display name.
     Profile { id: EndpointId, name: String },
+    /// A peer announcing their current status.
+    Status { id: EndpointId, status: BirdStatus },
+}
+
+/// A bird's current presence state.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub enum BirdStatus {
+    Online,
+    Idle,
+    InCall,
 }

@@ -6,7 +6,7 @@
 //! E2E encrypted via iroh's QUIC TLS 1.3.
 
 use crate::crypto::FlockCrypto;
-use crate::event::{AppEvent, ChatMessage, Command, GossipPayload};
+use crate::event::{AppEvent, BirdStatus, ChatMessage, Command, GossipPayload};
 use iroh::{
     Endpoint, EndpointId,
     endpoint::{Connection, presets},
@@ -163,9 +163,17 @@ pub async fn run(
                     tokio::spawn(async move {
                         let _ = crate::call::place_call(ep, addr, mic_rx).await;
                     });
+                    broadcast_payload(&sender, &crypto, &GossipPayload::Status {
+                        id: my_node_id, status: BirdStatus::InCall,
+                    }).await?;
                 }
 
-                Command::HangUp => { _mic_stream = None; }
+                Command::HangUp => {
+                    _mic_stream = None;
+                    broadcast_payload(&sender, &crypto, &GossipPayload::Status {
+                        id: my_node_id, status: BirdStatus::Online,
+                    }).await?;
+                }
 
                 Command::StartVideo(addr) => {
                     let (cam_tx, cam_rx) = mpsc::unbounded_channel();
@@ -190,6 +198,9 @@ pub async fn run(
                                 }
                                 Ok(GossipPayload::Profile { id, name }) => {
                                     let _ = evt_tx.send(AppEvent::PeerNamed(id, name));
+                                }
+                                Ok(GossipPayload::Status { id, status }) => {
+                                    let _ = evt_tx.send(AppEvent::PeerStatus(id, status));
                                 }
                                 Err(e) => {
                                     crate::logger::error(&format!("gossip deserialize error: {e}"));

@@ -1,6 +1,6 @@
 //! UI state and rendering.
 
-use crate::event::ChatMessage;
+use crate::event::{BirdStatus, ChatMessage};
 use image::RgbImage;
 use iroh::{EndpointAddr, EndpointId};
 use ratatui::{
@@ -32,6 +32,8 @@ pub struct App {
     pub muted: bool,
     /// Maps peer EndpointId → display name (from profile announcements).
     pub peer_names: HashMap<EndpointId, String>,
+    /// Maps peer EndpointId → current presence status.
+    pub peer_status: HashMap<EndpointId, BirdStatus>,
     /// Latest decoded video frame (JPEG → RgbImage).
     pub video_frame: Option<RgbImage>,
     /// Whether the video pane is currently shown.
@@ -154,8 +156,13 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     for (i, id) in app.peers.iter().enumerate() {
         let prefix = if i == app.selected_peer { "> " } else { "  " };
+        let glyph = match app.peer_status.get(id) {
+            Some(BirdStatus::InCall) => "🔊",
+            Some(BirdStatus::Idle) => "◌",
+            _ => "●",
+        };
         let display = app.peer_display_name(id);
-        peer_items.push(ListItem::new(format!("{prefix}{display}")));
+        peer_items.push(ListItem::new(format!("{prefix}{glyph} {display}")));
     }
 
     f.render_widget(

@@ -128,6 +128,7 @@ async fn main() -> anyhow::Result<()> {
                 AppEvent::PeerDisconnected(id) => {
                     app.peers.retain(|p| p != &id);
                     app.peer_names.remove(&id);
+                    app.peer_status.remove(&id);
                     if !app.peers.is_empty() {
                         app.selected_peer %= app.peers.len();
                     } else {
@@ -136,6 +137,9 @@ async fn main() -> anyhow::Result<()> {
                 }
                 AppEvent::PeerNamed(id, name) => {
                     app.peer_names.insert(id, name);
+                }
+                AppEvent::PeerStatus(id, s) => {
+                    app.peer_status.insert(id, s);
                 }
                 AppEvent::Ticket(code) => {
                     // Our own room code (openers only; joiners already have
@@ -153,6 +157,9 @@ async fn main() -> anyhow::Result<()> {
                     if let Ok(img) = image::load_from_memory(&jpeg) {
                         app.video_frame = Some(img.to_rgb8());
                     }
+                }
+                AppEvent::HistoryChunk(msgs) => {
+                    app.messages.extend(msgs);
                 }
             }
         }
