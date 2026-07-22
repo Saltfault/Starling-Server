@@ -82,7 +82,7 @@ impl Playback {
                     *sample = 0.0;
                 }
             },
-            |e| eprintln!("playback error: {e}"),
+            |e| crate::logger::error(&format!("playback error: {e}")),
             None,
         )?;
 
@@ -109,7 +109,7 @@ impl Playback {
             Ok(n) => {
                 self.producer.push_slice(&pcm[..n]);
             }
-            Err(e) => eprintln!("opus decode error: {e}"),
+            Err(e) => crate::logger::error(&format!("opus decode error: {e}")),
         }
     }
 }

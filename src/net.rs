@@ -131,7 +131,7 @@ pub async fn run(
                     Err(e) => {
                         // Don't kill the network task on a stream error
                         // (e.g. lagged receiver) — just log and continue.
-                        eprintln!("gossip stream error: {e}");
+                        crate::logger::error(&format!("gossip stream error: {e}"));
                     }
                 }
             }

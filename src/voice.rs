@@ -76,7 +76,7 @@ fn start_capture_inner(
                 }
             }
         },
-        |e| eprintln!("mic error: {e}"),
+        |e| crate::logger::error(&format!("mic error: {e}")),
         None,
     )?;
 

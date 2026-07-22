@@ -34,6 +34,7 @@
 
 mod call;
 mod event;
+mod logger;
 mod net;
 mod playback;
 mod ui;
@@ -63,6 +64,10 @@ fn generate_room_code() -> String {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // ── Initialize logging ────────────────────────────────────────────
+    // Zip the previous latest.log and start a fresh one.
+    logger::init();
+
     // ── Parse CLI args: `starling open` or `starling join <code>` ─────
     let args: Vec<String> = std::env::args().collect();
     let (topic, room_code) = match args.get(1).map(String::as_str) {
@@ -130,7 +135,7 @@ async fn main() -> anyhow::Result<()> {
     let mut playback = match playback::Playback::new() {
         Ok(p) => Some(p),
         Err(e) => {
-            eprintln!("warning: audio playback unavailable: {e}");
+            logger::warn(&format!("audio playback unavailable: {e}"));
             None
         }
     };
