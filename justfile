@@ -2,7 +2,7 @@
 #
 # Usage:
 #   just install-deps       # one-time: install all system packages
-#   just setup-wsl-audio    # one-time: WSL2 only — enables voice calls
+#   just setup              # configure profile, audio devices, and deps
 #   just run                # check deps, then run the app
 #   just build              # check deps, then build
 #   just join BIRD00CCFF    # join an existing flock
@@ -31,25 +31,6 @@ install-deps:
         echo "  Windows: Visual Studio Build Tools + CMake (see README)"; \
         exit 1; \
     fi
-
-setup-wsl-audio:
-    #!/usr/bin/env bash
-    if [ ! -d /mnt/wslg ]; then
-        echo "This command is for WSL2 only (no /mnt/wslg found)."
-        echo "On native Linux, PulseAudio works without this step."
-        exit 1
-    fi
-
-    echo "Installing libasound2-plugins (ALSA -> PulseAudio bridge)..."
-    sudo apt-get update && sudo apt-get install -y libasound2-plugins
-
-    echo "Writing /etc/asound.conf..."
-    echo 'pcm.!default pulse' | sudo tee /etc/asound.conf > /dev/null
-    echo 'ctl.!default pulse' | sudo tee -a /etc/asound.conf > /dev/null
-
-    echo ""
-    echo "Done! Voice calls should now work."
-    echo "Verify with: pactl info  (may need: sudo apt install pulseaudio-utils)"
 
 check-deps:
     #!/usr/bin/env bash
@@ -90,6 +71,9 @@ check-deps:
 
 build: check-deps
     cargo build
+
+setup:
+    cargo run -- setup
 
 run: check-deps
     cargo run -- open

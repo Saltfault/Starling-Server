@@ -25,10 +25,8 @@ use std::time::{Duration, Instant};
 
 /// Which step of the setup wizard we're on.
 enum Phase {
-    /// Checking for required system packages.
+    /// Checking for and installing required system packages.
     DependencyCheck,
-    /// Configuring the WSL2 PulseAudio bridge (Linux under WSL only).
-    WslAudio,
     /// Optionally loading an existing profile from its 32-digit code.
     CodeEntry,
     /// Entering the user's display name.
@@ -63,8 +61,6 @@ struct SetupApp {
     missing_deps: Vec<String>,
     /// Command to install missing dependencies.
     install_cmd: Option<String>,
-    /// Whether WSL2 audio needs setup.
-    needs_wsl_audio: bool,
     /// Status message after running an install command.
     install_status: String,
 }
@@ -82,14 +78,8 @@ impl SetupApp {
             install_command()
         };
 
-        let needs_wsl_audio = cfg!(target_os = "linux")
-            && std::path::Path::new("/mnt/wslg").exists()
-            && !std::path::Path::new("/etc/asound.conf").exists();
-
         let phase = if !missing_deps.is_empty() {
             Phase::DependencyCheck
-        } else if needs_wsl_audio {
-            Phase::WslAudio
         } else {
             Phase::CodeEntry
         };
@@ -105,7 +95,6 @@ impl SetupApp {
             profile,
             missing_deps,
             install_cmd,
-            needs_wsl_audio,
             install_status: String::new(),
         }
     }
@@ -153,6 +142,12 @@ fn check_dependencies() -> Vec<String> {
         {
             missing.push("libclang-dev (needed by nokhwa/V4L2 bindgen)".into());
         }
+        // WSL2 needs the ALSA->PulseAudio bridge for audio to work
+        if std::path::Path::new("/mnt/wslg").exists()
+            && !std::path::Path::new("/etc/asound.conf").exists()
+        {
+            missing.push("libasound2-plugins + /etc/asound.conf (WSL2 audio bridge)".into());
+        }
     }
 
     missing
@@ -160,8 +155,21 @@ fn check_dependencies() -> Vec<String> {
 
 /// Build the install command for the detected package manager, if any.
 fn install_command() -> Option<String> {
+    // Check if we're on WSL2 and need the audio bridge
+    let needs_wsl_audio = std::path::Path::new("/mnt/wslg").exists()
+        && !std::path::Path::new("/etc/asound.conf").exists();
+
+    let wsl_audio_suffix = if needs_wsl_audio {
+        " && sudo apt-get install -y libasound2-plugins && echo 'pcm.!default pulse' | sudo tee /etc/asound.conf > /dev/null && echo 'ctl.!default pulse' | sudo tee -a /etc/asound.conf > /dev/null"
+    } else {
+        ""
+    };
+
     if command_exists("apt-get") {
-        Some("sudo apt-get update && sudo apt-get install -y build-essential pkg-config libasound2-dev libpulse-dev libclang-dev".into())
+        Some(format!(
+            "sudo apt-get update && sudo apt-get install -y build-essential pkg-config libasound2-dev libpulse-dev libclang-dev{}",
+            wsl_audio_suffix
+        ))
     } else if command_exists("dnf") {
         Some(
             "sudo dnf install -y gcc pkgconf-pkg-config alsa-lib-devel pulseaudio-libs-devel clang-devel"
@@ -265,26 +273,6 @@ pub fn run_setup(
                             }
                         } else {
                             app.install_status = "No supported package manager found.".into();
-                        }
-                        app.phase = if app.needs_wsl_audio {
-                            Phase::WslAudio
-                        } else {
-                            Phase::CodeEntry
-                        };
-                    }
-                    KeyCode::Esc => return Ok(None),
-                    _ => {}
-                },
-
-                Phase::WslAudio => match k.code {
-                    KeyCode::Enter => {
-                        let cmd = "sudo apt-get update && sudo apt-get install -y libasound2-plugins && echo 'pcm.!default pulse' | sudo tee /etc/asound.conf > /dev/null && echo 'ctl.!default pulse' | sudo tee -a /etc/asound.conf > /dev/null";
-                        let success = run_shell_command(term, cmd);
-                        if success {
-                            app.needs_wsl_audio = false;
-                            app.install_status = "WSL2 audio configured successfully.".into();
-                        } else {
-                            app.install_status = "WSL2 audio setup failed.".into();
                         }
                         app.phase = Phase::CodeEntry;
                     }
@@ -411,7 +399,6 @@ fn draw(f: &mut Frame, app: &SetupApp) {
 
     match app.phase {
         Phase::DependencyCheck => draw_dependency_check(f, inner, app),
-        Phase::WslAudio => draw_wsl_audio(f, inner, app),
         Phase::CodeEntry => draw_code_entry(f, inner, app),
         Phase::NameEntry => draw_name_entry(f, inner, app),
         Phase::InputDevice => draw_device_list(
@@ -488,41 +475,6 @@ fn draw_dependency_check(f: &mut Frame, area: Rect, app: &SetupApp) {
         Paragraph::new(" Enter = install/continue . Esc = cancel")
             .style(Style::new().fg(Color::DarkGray)),
         chunks[4],
-    );
-}
-
-fn draw_wsl_audio(f: &mut Frame, area: Rect, app: &SetupApp) {
-    let chunks = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Min(1),
-    ])
-    .split(area);
-
-    f.render_widget(Paragraph::new("WSL2 Audio Setup"), chunks[0]);
-    f.render_widget(Paragraph::new(""), chunks[1]);
-    f.render_widget(
-        Paragraph::new("Voice calls need the ALSA-PulseAudio bridge."),
-        chunks[2],
-    );
-    f.render_widget(
-        Paragraph::new("This installs libasound2-plugins and writes /etc/asound.conf."),
-        chunks[3],
-    );
-
-    if !app.install_status.is_empty() {
-        f.render_widget(
-            Paragraph::new(format!(" {}", app.install_status)).style(Style::new().fg(Color::Green)),
-            chunks[4],
-        );
-    }
-
-    f.render_widget(
-        Paragraph::new(" Enter = install . Esc = skip").style(Style::new().fg(Color::DarkGray)),
-        chunks[5],
     );
 }
 
