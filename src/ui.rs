@@ -1,39 +1,35 @@
 //! UI state and rendering. The [`App`] struct holds all mutable state that
 //! the terminal loop reads and writes. The [`draw`] function renders it.
 //!
-//! The app has two phases:
-//!
-//! 1. **Name entry** — a centered popup asks for the bird's display name.
-//!    Rendered when `app.name` is empty.
-//! 2. **Chat** — the full chat UI with messages, a birds panel (peer list),
-//!    call status, and text input. Rendered once `app.name` is set.
+//! This module is purely presentational — it never touches the network or
+//! audio directly. State changes happen in `main.rs` in response to keyboard
+//! input or [`AppEvent`](crate::event::AppEvent)s.
 
 use crate::event::ChatMessage;
 use iroh::{EndpointAddr, EndpointId};
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
+    widgets::{Block, Borders, List, ListItem, Paragraph},
 };
 
 /// All mutable UI state.
 #[derive(Default)]
 pub struct App {
-    // ── Name entry phase ──────────────────────────────────────────────
+    /// The bird's display name (from profile).
     pub name: String,
-    pub name_input: String,
-
-    // ── Chat phase ────────────────────────────────────────────────────
+    /// Chat messages received (and echoed from our own broadcasts).
     pub messages: Vec<ChatMessage>,
+    /// Current text input buffer.
     pub input: String,
+    /// Connected peer IDs (from gossip neighbor-up/down events).
     pub peers: Vec<EndpointId>,
+    /// Index into `peers` for the currently selected peer (for calling).
     pub selected_peer: usize,
-    /// Room code shown in the header (e.g. "BIRDA1B2C3"). Set when the
-    /// endpoint binds (opener) or from the command line (joiner).
+    /// Room code shown in the header (e.g. "BIRD00CCFF").
     pub invite: Option<String>,
-    /// Full node ID — the invite ticket that other birds use to join.
-    /// Shown in the header so the user can share it.
-    pub ticket: Option<String>,
+    /// Whether we are currently in a call.
     pub in_call: bool,
+    /// Whether the mic is muted (display state).
     pub muted: bool,
 }
 
@@ -55,75 +51,8 @@ impl App {
     }
 }
 
-// ── Draw dispatcher ─────────────────────────────────────────────────────
-
+/// Render the chat UI.
 pub fn draw(f: &mut Frame, app: &App) {
-    if app.name.is_empty() {
-        draw_name_entry(f, app);
-    } else {
-        draw_chat(f, app);
-    }
-}
-
-// ── Name entry ──────────────────────────────────────────────────────────
-
-fn draw_name_entry(f: &mut Frame, app: &App) {
-    let area = f.area();
-    f.render_widget(Clear, area);
-
-    let width = 48.min(area.width);
-    let height = 9.min(area.height);
-    let popup = Rect::new(
-        area.x + (area.width.saturating_sub(width)) / 2,
-        area.y + (area.height.saturating_sub(height)) / 2,
-        width,
-        height,
-    );
-
-    f.render_widget(Clear, popup);
-    f.render_widget(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(" Welcome to Starling "),
-        popup,
-    );
-
-    let inner = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-    ])
-    .margin(1)
-    .split(popup);
-
-    f.render_widget(Paragraph::new("Join the murmuration."), inner[1]);
-    f.render_widget(
-        Paragraph::new(format!(" Name: {}_", app.name_input)).style(Style::new().fg(Color::Yellow)),
-        inner[3],
-    );
-    f.render_widget(
-        Paragraph::new(" Press Enter to continue ").style(Style::new().fg(Color::DarkGray)),
-        inner[5],
-    );
-}
-
-// ── Chat UI ─────────────────────────────────────────────────────────────
-
-fn room_code_rgb(code: &str) -> Option<(u8, u8, u8)> {
-    let hex = code.strip_prefix("BIRD")?;
-    if hex.len() != 6 {
-        return None;
-    }
-    let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
-    let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
-    let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
-    Some((r, g, b))
-}
-
-fn draw_chat(f: &mut Frame, app: &App) {
     let chunks = Layout::vertical([
         Constraint::Length(1), // header
         Constraint::Min(1),    // messages + birds panel
@@ -132,7 +61,7 @@ fn draw_chat(f: &mut Frame, app: &App) {
     ])
     .split(f.area());
 
-    // ── Header: color swatch + room code + invite ticket ──────────────
+    // ── Header: color swatch + room code only ──────────────────────────
     let room_code = app.invite.as_deref().unwrap_or("waiting for endpoint...");
 
     let mut header_spans: Vec<Span> = Vec::new();
@@ -140,8 +69,8 @@ fn draw_chat(f: &mut Frame, app: &App) {
     if let Some((r, g, b)) = room_code_rgb(room_code) {
         let full = Color::Rgb(r, g, b);
         let half = Color::Rgb(r / 2, g / 2, b / 2);
-        header_spans.push(Span::styled("▀", Style::new().fg(full).bg(half)));
-        header_spans.push(Span::styled("▄", Style::new().fg(full).bg(half)));
+        header_spans.push(Span::styled("\u{2580}", Style::new().fg(full).bg(half)));
+        header_spans.push(Span::styled("\u{2584}", Style::new().fg(full).bg(half)));
         header_spans.push(Span::raw(" "));
     }
 
@@ -149,20 +78,6 @@ fn draw_chat(f: &mut Frame, app: &App) {
         format!(" {} ", room_code),
         Style::new().fg(Color::DarkGray),
     ));
-
-    // Show the invite ticket (node ID) if available, truncated to fit.
-    if let Some(ticket) = &app.ticket {
-        let max_len = 16;
-        let display = if ticket.len() > max_len {
-            format!("{}...", &ticket[..max_len])
-        } else {
-            ticket.clone()
-        };
-        header_spans.push(Span::styled(
-            format!(" invite: {} ", display),
-            Style::new().fg(Color::DarkGray),
-        ));
-    }
 
     f.render_widget(Line::from(header_spans), chunks[0]);
 
@@ -231,4 +146,15 @@ fn draw_chat(f: &mut Frame, app: &App) {
             .block(Block::default().borders(Borders::ALL).title(" message ")),
         chunks[3],
     );
+}
+
+fn room_code_rgb(code: &str) -> Option<(u8, u8, u8)> {
+    let hex = code.strip_prefix("BIRD")?;
+    if hex.len() != 6 {
+        return None;
+    }
+    let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+    Some((r, g, b))
 }

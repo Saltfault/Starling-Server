@@ -6,16 +6,8 @@
 //! - `starling open`  — start a new flock
 //! - `starling join <node-id>` — join an existing flock
 //!
-//! Keybindings (chat mode):
-//!
-//! | Key        | Action                          |
-//! |------------|---------------------------------|
-//! | `Enter`    | Send typed message              |
-//! | `Ctrl+K`   | Start call / hang up            |
-//! | `Ctrl+M`   | Toggle mute                     |
-//! | `Tab`      | Cycle selected peer             |
-//! | `Backspace`| Delete last character           |
-//! | `Esc`      | Quit                            |
+//! If no profile exists, `open` and `join` automatically run the setup wizard
+//! before entering the chat.
 
 mod call;
 mod config;
@@ -59,10 +51,6 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // ── Subcommand: `starling open` or `starling join <node-id>` ──────
-    //
-    // For "open": no bootstrap — we're the opener, joiners connect to us.
-    // For "join <node-id>": bootstrap with the opener's node ID so the
-    // gossip protocol connects us to them.
     let bootstrap = match args.get(1).map(String::as_str) {
         Some("join") => {
             let node_id: iroh::EndpointId = args[2].parse()?;
@@ -71,7 +59,7 @@ async fn main() -> anyhow::Result<()> {
         _ => vec![],
     };
 
-    // Load profile from disk (if it exists).
+    // Load profile from disk.
     let profile = config::Profile::load();
 
     // Set up the terminal.
@@ -81,16 +69,16 @@ async fn main() -> anyhow::Result<()> {
     let mut term = ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(stdout))?;
     let mut app = App::default();
 
-    // For "join", we know the room code immediately (derived from the
-    // opener's node ID). For "open", it arrives via AppEvent::Ticket.
+    // For "join", derive the room code from the opener's node ID immediately.
     if let Some(node_id_str) = args.get(2) {
         if let Ok(node_id) = node_id_str.parse::<iroh::EndpointId>() {
             app.invite = Some(net::room_code_from_node_id(&node_id));
-            app.ticket = Some(node_id_str.clone());
         }
     }
 
-    // If a profile exists, use its name. Otherwise, show the name popup.
+    // Get the user's name and device preferences. If a profile exists, use
+    // it directly. If not, run the setup wizard (which saves the profile
+    // to disk for next time).
     let (name, input_device, output_device) = if let Some(p) = &profile {
         app.name = p.name.clone();
         (
@@ -99,25 +87,23 @@ async fn main() -> anyhow::Result<()> {
             p.output_device.clone(),
         )
     } else {
-        loop {
-            term.draw(|f| ui::draw(f, &app))?;
-            if ct_event::poll(std::time::Duration::from_millis(50))? {
-                if let Event::Key(k) = ct_event::read()? {
-                    match k.code {
-                        KeyCode::Enter if !app.name_input.is_empty() => {
-                            app.name = std::mem::take(&mut app.name_input);
-                            break;
-                        }
-                        KeyCode::Char(c) => app.name_input.push(c),
-                        KeyCode::Backspace => {
-                            app.name_input.pop();
-                        }
-                        _ => {}
-                    }
-                }
+        // No profile — run the setup wizard.
+        match setup::run_setup(&mut term)? {
+            Some(p) => {
+                app.name = p.name.clone();
+                (
+                    p.name.clone(),
+                    p.input_device.clone(),
+                    p.output_device.clone(),
+                )
+            }
+            None => {
+                // User cancelled setup — exit.
+                disable_raw_mode()?;
+                execute!(term.backend_mut(), LeaveAlternateScreen)?;
+                return Ok(());
             }
         }
-        (app.name.clone(), None, None)
     };
 
     // Start the network task. The topic, room code, and E2E key are all
@@ -164,13 +150,10 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
                 AppEvent::Ticket(node_id_str) => {
-                    // For "open": this is our own node ID — derive the room
-                    // code from it and update the display. This is also the
-                    // invite ticket that other birds use to join.
+                    // For "open": derive the room code from our own node ID.
                     if app.invite.is_none() {
                         if let Ok(node_id) = node_id_str.parse::<iroh::EndpointId>() {
                             app.invite = Some(net::room_code_from_node_id(&node_id));
-                            app.ticket = Some(node_id_str);
                         }
                     }
                 }
