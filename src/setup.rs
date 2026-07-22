@@ -148,6 +148,20 @@ fn check_dependencies() -> Vec<String> {
         {
             missing.push("libasound2-plugins + /etc/asound.conf (WSL2 audio bridge)".into());
         }
+        // WSL2 doesn't expose webcams by default — check for /dev/video*
+        if std::path::Path::new("/mnt/wslg").exists()
+            && !std::fs::read_dir("/dev")
+                .map(|mut d| {
+                    d.any(|e| {
+                        e.ok().map_or(false, |f| {
+                            f.file_name().to_string_lossy().starts_with("video")
+                        })
+                    })
+                })
+                .unwrap_or(false)
+        {
+            missing.push("webcam (WSL2): install usbipd-win on Windows, then attach camera".into());
+        }
     }
 
     missing
@@ -160,7 +174,7 @@ fn install_command() -> Option<String> {
         && !std::path::Path::new("/etc/asound.conf").exists();
 
     let wsl_audio_suffix = if needs_wsl_audio {
-        " && sudo apt-get install -y libasound2-plugins && echo 'pcm.!default pulse' | sudo tee /etc/asound.conf > /dev/null && echo 'ctl.!default pulse' | sudo tee -a /etc/asound.conf > /dev/null"
+        " && sudo apt-get install -y libasound2-plugins && printf 'pcm.!default {\\n    type pulse\\n}\\nctl.!default {\\n    type pulse\\n}\\n' | sudo tee /etc/asound.conf > /dev/null"
     } else {
         ""
     };
@@ -440,10 +454,36 @@ fn draw_dependency_check(f: &mut Frame, area: Rect, app: &SetupApp) {
     } else {
         lines.push(Line::raw("  Missing:"));
         for dep in &app.missing_deps {
-            lines.push(Line::styled(
-                format!("    x {}", dep),
-                Style::new().fg(Color::Red),
-            ));
+            if dep.contains("webcam") && dep.contains("WSL2") {
+                lines.push(Line::styled(
+                    format!("    ! {}", dep),
+                    Style::new().fg(Color::Yellow),
+                ));
+                lines.push(Line::raw(""));
+                lines.push(Line::raw(
+                    "  WSL2 webcam setup (run in Windows PowerShell as Admin):",
+                ));
+                lines.push(Line::raw("    1. winget install usbipd"));
+                lines.push(Line::raw(
+                    "    2. usbipd list              # find your camera",
+                ));
+                lines.push(Line::raw("    3. usbipd bind --busid <X>  # share it"));
+                lines.push(Line::raw("    4. usbipd attach --wsl --busid <X>"));
+                lines.push(Line::raw(""));
+                lines.push(Line::raw("  Then in WSL2:"));
+                lines.push(Line::raw(
+                    "    5. sudo apt install linux-tools-generic usbip hwdata",
+                ));
+                lines.push(Line::raw("    6. sudo update-usbids"));
+                lines.push(Line::raw(
+                    "    7. ls /dev/video*           # should show your camera",
+                ));
+            } else {
+                lines.push(Line::styled(
+                    format!("    x {}", dep),
+                    Style::new().fg(Color::Red),
+                ));
+            }
         }
         lines.push(Line::raw(""));
         if let Some(cmd) = &app.install_cmd {

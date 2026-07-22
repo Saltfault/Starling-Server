@@ -78,7 +78,8 @@ starling join BIRD-00CCFF-00CCFF-...
 ## Platform setup
 
 Before installing Starling, you need Rust and a C compiler. Follow the
-section for your platform.
+section for your platform. Then run `starling setup` (or `just setup`) to
+configure your profile, audio devices, and any platform-specific dependencies.
 
 ### Windows
 
@@ -242,8 +243,27 @@ starling open
 ```
 
 If you're on an older Windows 10 build without WSLg, audio won't work in
-WSL2 — use a [native Windows build](#windows) instead. Webcams are not
-exposed in WSL2; use a native Windows build for video calls.
+WSL2 — use a [native Windows build](#windows) instead.
+
+**Webcam on WSL2:** Webcams are not exposed by default. To use video calls
+from WSL2, set up USB passthrough (run in Windows PowerShell as Admin):
+
+```powershell
+winget install usbipd
+usbipd list                    # find your camera's BUSID
+usbipd bind --busid <BUSID>
+usbipd attach --wsl --busid <BUSID>
+```
+
+Then in WSL2:
+
+```bash
+sudo apt install linux-tools-generic usbip hwdata
+sudo update-usbids
+ls /dev/video*                  # should show your camera
+```
+
+Alternatively, use a [native Windows build](#windows) for video calls.
 
 ---
 
@@ -412,6 +432,27 @@ sudo pacman -S clang            # Arch
 ```
 
 This is required by nokhwa for webcam support.
+
+### No webcam detected (WSL2)
+
+WSL2 doesn't expose USB webcams by default. Set up USB passthrough:
+
+In Windows PowerShell (as Admin):
+```powershell
+winget install usbipd
+usbipd list                     # find your camera's BUSID
+usbipd bind --busid <BUSID>
+usbipd attach --wsl --busid <BUSID>
+```
+
+In WSL2:
+```bash
+sudo apt install linux-tools-generic usbip hwdata
+sudo update-usbids
+ls /dev/video*                   # should show your camera
+```
+
+Then re-run `starling setup` to detect the camera.
 
 ### Build is slow on first compile
 

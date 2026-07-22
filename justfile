@@ -11,31 +11,37 @@ install-deps:
     @if command -v apt-get >/dev/null 2>&1; then \
         echo "Detected Debian/Ubuntu/WSL — installing..."; \
         sudo apt-get update && sudo apt-get install -y \
-            build-essential cmake pkg-config libasound2-dev libpulse-dev libclang-dev; \
+            build-essential pkg-config libasound2-dev libpulse-dev libclang-dev; \
+        if [ -d /mnt/wslg ] && [ ! -f /etc/asound.conf ]; then \
+            echo "Setting up WSL2 audio bridge..."; \
+            sudo apt-get install -y libasound2-plugins; \
+            printf 'pcm.!default {\ntype pulse\n}\nctl.!default {\ntype pulse\n}\n' | sudo tee /etc/asound.conf > /dev/null; \
+            echo "WSL2 audio bridge installed."; \
+        fi; \
     elif command -v dnf >/dev/null 2>&1; then \
         echo "Detected Fedora — installing..."; \
         sudo dnf install -y \
-            gcc cmake pkgconf-pkg-config alsa-lib-devel pulseaudio-libs-devel clang-devel; \
+            gcc pkgconf-pkg-config alsa-lib-devel pulseaudio-libs-devel clang-devel; \
     elif command -v pacman >/dev/null 2>&1; then \
         echo "Detected Arch — installing..."; \
-        sudo pacman -S --noconfirm base-devel cmake pkgconf alsa-lib pulseaudio clang; \
+        sudo pacman -S --noconfirm base-devel pkgconf alsa-lib pulseaudio clang; \
     elif command -v brew >/dev/null 2>&1; then \
         echo "Detected macOS (Homebrew) — installing..."; \
-        brew install cmake pkg-config; \
+        brew install pkg-config; \
     else \
         echo "Could not detect a supported package manager."; \
         echo ""; \
         echo "Please install manually:"; \
-        echo "  Linux:  gcc, cmake, pkg-config, alsa-lib-dev, pulseaudio-dev, libclang-dev"; \
-        echo "  macOS:  cmake, pkg-config (via Homebrew)"; \
-        echo "  Windows: Visual Studio Build Tools + CMake (see README)"; \
+        echo "  Linux:  gcc, pkg-config, alsa-lib-dev, pulseaudio-dev, libclang-dev"; \
+        echo "  macOS:  pkg-config (via Homebrew)"; \
+        echo "  Windows: Visual Studio Build Tools (see README)"; \
         exit 1; \
     fi
 
 check-deps:
     #!/usr/bin/env bash
     missing=0
-    for tool in cmake cc; do
+    for tool in cc; do
         if ! command -v "$tool" >/dev/null 2>&1; then
             echo "✗ '$tool' not found"
             missing=1
@@ -60,11 +66,17 @@ check-deps:
             echo "✗ libclang not found (install libclang-dev for nokhwa/V4L2)"
             missing=1
         fi
+        # WSL2 audio bridge check
+        if [ -d /mnt/wslg ] && [ ! -f /etc/asound.conf ]; then
+            echo "✗ WSL2 audio bridge not configured (run 'just setup' or 'starling setup')"
+            missing=1
+        fi
     fi
 
     if [ "$missing" -ne 0 ]; then
         echo ""
-        echo "Run 'just install-deps' to install everything."
+        echo "Run 'just install-deps' to install system packages,"
+        echo "then 'just setup' to configure audio and profile."
         exit 1
     fi
     echo "✓ All build dependencies present"
