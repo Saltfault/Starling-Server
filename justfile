@@ -5,7 +5,7 @@
 #   just setup-wsl-audio    # one-time: WSL2 only — enables voice calls
 #   just run                # check deps, then run the app
 #   just build              # check deps, then build
-#   just join BIRD123456    # join an existing flock
+#   just join BIRD00CCFF    # join an existing flock
 
 # Install all system dependencies needed to build and run starling.
 # Detects the OS/distro and uses the appropriate package manager.

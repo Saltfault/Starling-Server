@@ -40,7 +40,7 @@ cd Starling
 cargo install --git https://forgejo.hearthhome.lol/Saltfault/Starling.git
 ```
 
-Then run `starling open` or `starling join BIRD324524` directly. You'll still
+Then run `starling open` or `starling join BIRD00CCFF` directly. You'll still
 need the system dependencies below — `cargo install` doesn't include the
 `justfile`.
 
@@ -260,7 +260,7 @@ cargo run -- open
 The app starts and the header shows a room code:
 
 ```
- flock: BIRD324524
+ flock: BIRD00CCFF
 ```
 
 Share this code with another bird so they can join your flock.
@@ -268,9 +268,9 @@ Share this code with another bird so they can join your flock.
 ### Join an existing flock
 
 ```bash
-just join BIRD324524
+just join BIRD00CCFF
 # or
-cargo run -- join BIRD324524
+cargo run -- join BIRD00CCFF
 ```
 
 ### Set your name
@@ -337,7 +337,7 @@ Birds connect to the murmuration through iroh's global relay network and
 node discovery. No central server coordinates them:
 
 1. A bird opens a flock by generating a random room code (e.g.
-   `BIRD324524`) and subscribing to a gossip topic derived from it via
+   `BIRD00CCFF`) and subscribing to a gossip topic derived from it via
    SHA-256.
 2. Other birds join by entering the same room code — they subscribe to
    the same gossip topic.

@@ -52,14 +52,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc;
 use ui::App;
 
-/// Generate a random room code: "BIRD" + 6 digits (e.g. "BIRD324524").
+/// Generate a random room code: "BIRD" + 6 hex digits (e.g. "BIRD00CCFF").
 fn generate_room_code() -> String {
     let uuid = uuid::Uuid::new_v4();
     let bytes = uuid.as_bytes();
-    let digits: String = (0..6)
-        .map(|i| char::from_digit((bytes[i] % 10) as u32, 10).unwrap())
-        .collect();
-    format!("BIRD{digits}")
+    let hex: String = (0..3).map(|i| format!("{:02X}", bytes[i])).collect();
+    format!("BIRD{hex}")
 }
 
 #[tokio::main]
