@@ -37,7 +37,7 @@ video calls.
 **Install Starling:**
 
 ```bash
-cargo install --git https://forgejo.hearthhome.lol/Saltfault/Starling.git
+cargo install --git https://forgejo.hearthhome.lol/Saltfault/Starling-TUI.git
 ```
 
 **Configure your profile (one-time):**
@@ -66,8 +66,8 @@ starling join BIRD-00CCFF-00CCFF-...
 
 > **Developing?** You can also clone and run from source:
 > ```bash
-> git clone https://forgejo.hearthhome.lol/Saltfault/Starling.git
-> cd Starling
+> git clone https://forgejo.hearthhome.lol/Saltfault/Starling-TUI.git
+> cd Starling-TUI
 > cargo run -- open
 > ```
 > The `justfile` provides `just install-deps`, `just setup`, `just run`,
@@ -99,7 +99,7 @@ Or download and run [rustup-init.exe](https://win.rustup.rs/x86_64).
 **3. Install Starling:**
 
 ```powershell
-cargo install --git https://forgejo.hearthhome.lol/Saltfault/Starling.git
+cargo install --git https://forgejo.hearthhome.lol/Saltfault/Starling-TUI.git
 ```
 
 **4. Run:**
@@ -135,7 +135,7 @@ source "$HOME/.cargo/env"
 **4. Install Starling:**
 
 ```bash
-cargo install --git https://forgejo.hearthhome.lol/Saltfault/Starling.git
+cargo install --git https://forgejo.hearthhome.lol/Saltfault/Starling-TUI.git
 ```
 
 **5. Run:**
@@ -172,7 +172,7 @@ source "$HOME/.cargo/env"
 **3. Install Starling:**
 
 ```bash
-cargo install --git https://forgejo.hearthhome.lol/Saltfault/Starling.git
+cargo install --git https://forgejo.hearthhome.lol/Saltfault/Starling-TUI.git
 ```
 
 **4. Run:**
@@ -233,7 +233,7 @@ If you skip this step, text chat works but voice calls won't.
 **5. Install Starling:**
 
 ```bash
-cargo install --git https://forgejo.hearthhome.lol/Saltfault/Starling.git
+cargo install --git https://forgejo.hearthhome.lol/Saltfault/Starling-TUI.git
 ```
 
 **6. Run:**
