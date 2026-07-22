@@ -147,6 +147,12 @@ fn check_dependencies() -> Vec<String> {
         if !pkg_config_exists("libpulse") {
             missing.push("libpulse-dev (PulseAudio headers)".into());
         }
+        // nokhwa's V4L2 backend needs libclang for bindgen at build time
+        if !command_exists("libclang")
+            && !std::path::Path::new("/usr/lib/x86_64-linux-gnu/libclang.so").exists()
+        {
+            missing.push("libclang-dev (needed by nokhwa/V4L2 bindgen)".into());
+        }
     }
 
     missing
@@ -155,14 +161,14 @@ fn check_dependencies() -> Vec<String> {
 /// Build the install command for the detected package manager, if any.
 fn install_command() -> Option<String> {
     if command_exists("apt-get") {
-        Some("sudo apt-get update && sudo apt-get install -y build-essential pkg-config libasound2-dev libpulse-dev".into())
+        Some("sudo apt-get update && sudo apt-get install -y build-essential pkg-config libasound2-dev libpulse-dev libclang-dev".into())
     } else if command_exists("dnf") {
         Some(
-            "sudo dnf install -y gcc pkgconf-pkg-config alsa-lib-devel pulseaudio-libs-devel"
+            "sudo dnf install -y gcc pkgconf-pkg-config alsa-lib-devel pulseaudio-libs-devel clang-devel"
                 .into(),
         )
     } else if command_exists("pacman") {
-        Some("sudo pacman -S --noconfirm base-devel pkgconf alsa-lib pulseaudio".into())
+        Some("sudo pacman -S --noconfirm base-devel pkgconf alsa-lib pulseaudio clang".into())
     } else if command_exists("brew") {
         Some("brew install pkg-config".into())
     } else {

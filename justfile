@@ -11,14 +11,14 @@ install-deps:
     @if command -v apt-get >/dev/null 2>&1; then \
         echo "Detected Debian/Ubuntu/WSL — installing..."; \
         sudo apt-get update && sudo apt-get install -y \
-            build-essential cmake pkg-config libasound2-dev libpulse-dev; \
+            build-essential cmake pkg-config libasound2-dev libpulse-dev libclang-dev; \
     elif command -v dnf >/dev/null 2>&1; then \
         echo "Detected Fedora — installing..."; \
         sudo dnf install -y \
-            gcc cmake pkgconf-pkg-config alsa-lib-devel pulseaudio-libs-devel; \
+            gcc cmake pkgconf-pkg-config alsa-lib-devel pulseaudio-libs-devel clang-devel; \
     elif command -v pacman >/dev/null 2>&1; then \
         echo "Detected Arch — installing..."; \
-        sudo pacman -S --noconfirm base-devel cmake pkgconf alsa-lib pulseaudio; \
+        sudo pacman -S --noconfirm base-devel cmake pkgconf alsa-lib pulseaudio clang; \
     elif command -v brew >/dev/null 2>&1; then \
         echo "Detected macOS (Homebrew) — installing..."; \
         brew install cmake pkg-config; \
@@ -26,7 +26,7 @@ install-deps:
         echo "Could not detect a supported package manager."; \
         echo ""; \
         echo "Please install manually:"; \
-        echo "  Linux:  gcc, cmake, pkg-config, alsa-lib-dev, pulseaudio-dev"; \
+        echo "  Linux:  gcc, cmake, pkg-config, alsa-lib-dev, pulseaudio-dev, libclang-dev"; \
         echo "  macOS:  cmake, pkg-config (via Homebrew)"; \
         echo "  Windows: Visual Studio Build Tools + CMake (see README)"; \
         exit 1; \
@@ -73,6 +73,10 @@ check-deps:
             fi
         else
             echo "✗ pkg-config not found"
+            missing=1
+        fi
+        if ! ls /usr/lib/x86_64-linux-gnu/libclang.so* >/dev/null 2>&1 && ! ls /usr/lib/llvm-*/lib/libclang.so* >/dev/null 2>&1; then
+            echo "✗ libclang not found (install libclang-dev for nokhwa/V4L2)"
             missing=1
         fi
     fi

@@ -16,7 +16,6 @@ image = "0.25.10"
 iroh = "1.0.3"
 iroh-gossip = "0.101.0"
 n0-future = "0.3.2"
-nokhwa = { version = "0.10.11", features = ["input-native"] }
 postcard = { version = "1.1.3", features = ["use-std"] }
 ratatui = "0.30.2"
 ringbuf = "0.5.1"
@@ -25,11 +24,20 @@ sha2 = "0.11.0"
 tokio = { version = "1.53.1", features = ["full"] }
 uuid = { version = "1.24.0", features = ["v4", "serde"] }
 
-# Linux: enable cpal's PulseAudio backend + libc for stderr suppression
+# Linux: cpal PulseAudio backend, libc, nokhwa (V4L2 — needs libclang-dev)
 [target.'cfg(target_os = "linux")'.dependencies]
 cpal = { version = "0.18.1", features = ["pulseaudio"] }
 libc = "0.2"
+nokhwa = { version = "0.10.11", features = ["input-native"] }
 
-# Other Unix (macOS, BSDs): libc for stderr suppression
-[target.'cfg(all(unix, not(target_os = "linux")))'.dependencies]
+# Windows: nokhwa (Media Foundation — no extra deps needed)
+[target.'cfg(target_os = "windows")'.dependencies]
+nokhwa = { version = "0.10.11", features = ["input-native"] }
+
+# macOS: nokhwa (AVFoundation — no extra deps needed)
+[target.'cfg(target_os = "macos")'.dependencies]
+nokhwa = { version = "0.10.11", features = ["input-native"] }
+
+# Other Unix (BSDs): libc for stderr suppression
+[target.'cfg(all(unix, not(target_os = "linux"), not(target_os = "macos")))'.dependencies]
 libc = "0.2"
