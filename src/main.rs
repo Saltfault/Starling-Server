@@ -1,27 +1,10 @@
 //! Starling — a federated p2p communications platform where peers, known as
 //! birds, communicate via the murmuration.
 //!
-//! Architecture (one task + one UI loop):
-//!
-//! ```text
-//! ┌──────────────────────────────────────────────────────────────────┐
-//! │ main.rs (UI loop)                                                │
-//! │   keyboard → Command ──┐                                         │
-//! │   AppEvent ←───────────┤──── mpsc channels ────┐                │
-//! │   playback ← VoiceFrame│                       │                │
-//! └────────────────────────┊────────────────────────┊───────────────┘
-//!                          ▼                        ▼
-//! ┌──────────────────────────────────────────────────────────────────┐
-//! │ net.rs (network task)                                            │
-//! │   gossip for chat (E2E encrypted) · QUIC datagrams for voice     │
-//! │   mic capture (voice.rs) → place_call (call.rs)                  │
-//! └──────────────────────────────────────────────────────────────────┘
-//! ```
-//!
 //! Subcommands:
 //! - `starling setup` — configure profile (name, audio devices, code)
 //! - `starling open`  — start a new flock
-//! - `starling join <code>` — join an existing flock
+//! - `starling join <node-id>` — join an existing flock
 //!
 //! Keybindings (chat mode):
 //!
@@ -57,14 +40,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc;
 use ui::App;
 
-/// Generate a random room code: "BIRD" + 6 hex digits (e.g. "BIRD00CCFF").
-fn generate_room_code() -> String {
-    let uuid = uuid::Uuid::new_v4();
-    let bytes = uuid.as_bytes();
-    let hex: String = (0..3).map(|i| format!("{:02X}", bytes[i])).collect();
-    format!("BIRD{hex}")
-}
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     logger::init();
@@ -83,20 +58,18 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // ── Subcommand: `starling open` or `starling join <code>` ─────────
-    let (topic, room_code) = match args.get(1).map(String::as_str) {
+    // ── Subcommand: `starling open` or `starling join <node-id>` ──────
+    //
+    // For "open": no bootstrap — we're the opener, joiners connect to us.
+    // For "join <node-id>": bootstrap with the opener's node ID so the
+    // gossip protocol connects us to them.
+    let bootstrap = match args.get(1).map(String::as_str) {
         Some("join") => {
-            let code = args[2].clone();
-            (net::topic_for(&format!("starling/flock/{code}")), code)
+            let node_id: iroh::EndpointId = args[2].parse()?;
+            vec![node_id]
         }
-        _ => {
-            let code = generate_room_code();
-            (net::topic_for(&format!("starling/flock/{code}")), code)
-        }
+        _ => vec![],
     };
-
-    // E2E encryption context derived from the room code.
-    let flock_crypto = crypto::FlockCrypto::from_room_code(&room_code);
 
     // Load profile from disk (if it exists).
     let profile = config::Profile::load();
@@ -107,7 +80,15 @@ async fn main() -> anyhow::Result<()> {
     execute!(stdout, EnterAlternateScreen)?;
     let mut term = ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(stdout))?;
     let mut app = App::default();
-    app.invite = Some(room_code);
+
+    // For "join", we know the room code immediately (derived from the
+    // opener's node ID). For "open", it arrives via AppEvent::Ticket.
+    if let Some(node_id_str) = args.get(2) {
+        if let Ok(node_id) = node_id_str.parse::<iroh::EndpointId>() {
+            app.invite = Some(net::room_code_from_node_id(&node_id));
+            app.ticket = Some(node_id_str.clone());
+        }
+    }
 
     // If a profile exists, use its name. Otherwise, show the name popup.
     let (name, input_device, output_device) = if let Some(p) = &profile {
@@ -118,7 +99,6 @@ async fn main() -> anyhow::Result<()> {
             p.output_device.clone(),
         )
     } else {
-        // Name entry popup (fallback when no profile exists).
         loop {
             term.draw(|f| ui::draw(f, &app))?;
             if ct_event::poll(std::time::Duration::from_millis(50))? {
@@ -140,22 +120,21 @@ async fn main() -> anyhow::Result<()> {
         (app.name.clone(), None, None)
     };
 
-    // Start the network task with E2E crypto and mic device preference.
+    // Start the network task. The topic, room code, and E2E key are all
+    // derived inside net::run from the opener's node ID.
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<Command>();
     let (evt_tx, mut evt_rx) = mpsc::unbounded_channel::<AppEvent>();
     let muted_flag = Arc::new(AtomicBool::new(false));
 
     tokio::spawn(net::run(
-        topic,
+        bootstrap,
         cmd_rx,
         evt_tx,
         muted_flag.clone(),
         name,
-        flock_crypto,
         input_device,
     ));
 
-    // Set up audio playback with device preference.
     let mut playback = match playback::Playback::new(output_device.as_deref()) {
         Ok(p) => Some(p),
         Err(e) => {
@@ -182,6 +161,17 @@ async fn main() -> anyhow::Result<()> {
                         app.selected_peer %= app.peers.len();
                     } else {
                         app.selected_peer = 0;
+                    }
+                }
+                AppEvent::Ticket(node_id_str) => {
+                    // For "open": this is our own node ID — derive the room
+                    // code from it and update the display. This is also the
+                    // invite ticket that other birds use to join.
+                    if app.invite.is_none() {
+                        if let Ok(node_id) = node_id_str.parse::<iroh::EndpointId>() {
+                            app.invite = Some(net::room_code_from_node_id(&node_id));
+                            app.ticket = Some(node_id_str);
+                        }
                     }
                 }
                 AppEvent::VoiceFrame(bytes) => {

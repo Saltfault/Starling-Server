@@ -4,18 +4,11 @@
 //! All gossip text messages are **end-to-end encrypted** with
 //! ChaCha20-Poly1305 using a key derived from the room code. Voice calls are
 //! E2E encrypted via iroh's QUIC TLS 1.3.
-//!
-//! This module is spawned as a single tokio task by `main`. It runs a
-//! `tokio::select!` loop that:
-//!
-//! 1. Receives [`Command`]s from the UI and acts on them (sending text,
-//!    starting/hanging up calls, quitting).
-//! 2. Receives gossip [`Event`]s and forwards them to the UI as [`AppEvent`]s.
 
 use crate::crypto::FlockCrypto;
 use crate::event::{AppEvent, ChatMessage, Command};
 use iroh::{
-    Endpoint,
+    Endpoint, EndpointId,
     endpoint::{Connection, presets},
     protocol::Router,
 };
@@ -30,33 +23,54 @@ use std::sync::atomic::AtomicBool;
 use tokio::sync::mpsc;
 
 /// Derive a stable 32-byte [`TopicId`] from a human-readable name by hashing
-/// it with SHA-256. Everyone who uses the same name gets the same topic.
+/// it with SHA-256.
 pub fn topic_for(name: &str) -> TopicId {
     use sha2::{Digest, Sha256};
     let hash = Sha256::digest(name.as_bytes());
     TopicId::from_bytes(hash.into())
 }
 
+/// Derive a short room code from a node ID: "BIRD" + first 6 hex chars.
+pub fn room_code_from_node_id(node_id: &EndpointId) -> String {
+    let bytes = node_id.as_bytes();
+    let hex: String = (0..3).map(|i| format!("{:02X}", bytes[i])).collect();
+    format!("BIRD{hex}")
+}
+
 /// The main network loop. Spawned once by `main`.
 ///
-/// * `topic` — the gossip topic to subscribe to (derived from the room code).
+/// * `bootstrap` — opener's node ID for joiners (empty for the opener).
+///   The room code, gossip topic, and E2E key are all derived from the
+///   opener's node ID. For the opener, that's our own node ID (after binding).
 /// * `cmd_rx` — receives commands from the UI.
 /// * `evt_tx` — sends events to the UI.
 /// * `muted` — shared mute flag, passed through to the mic capture callback.
 /// * `name` — the bird's display name, used as the author on chat messages.
-/// * `crypto` — E2E encryption context for gossip messages.
 /// * `input_device` — preferred microphone device name (from profile).
 pub async fn run(
-    topic: TopicId,
+    bootstrap: Vec<EndpointId>,
     mut cmd_rx: mpsc::UnboundedReceiver<Command>,
     evt_tx: mpsc::UnboundedSender<AppEvent>,
     muted: Arc<AtomicBool>,
     name: String,
-    crypto: FlockCrypto,
     input_device: Option<String>,
 ) -> anyhow::Result<()> {
     let endpoint = Endpoint::bind(presets::N0).await?;
     endpoint.online().await;
+
+    let my_node_id = endpoint.addr().id;
+
+    // The "opener" is whoever opened the flock. For joiners, that's
+    // bootstrap[0]. For openers, that's ourselves.
+    let opener_id = bootstrap.first().copied().unwrap_or(my_node_id);
+
+    // Derive room code, topic, and E2E key from the opener's node ID.
+    let room_code = room_code_from_node_id(&opener_id);
+    let topic = topic_for(&format!("starling/flock/{room_code}"));
+    let crypto = FlockCrypto::from_room_code(&room_code);
+
+    // Send our node ID to the UI (this is the invite ticket for openers).
+    let _ = evt_tx.send(AppEvent::Ticket(my_node_id.to_string()));
 
     let gossip = Gossip::builder().spawn(endpoint.clone());
 
@@ -70,7 +84,10 @@ pub async fn run(
         )
         .spawn();
 
-    let (sender, mut receiver) = gossip.subscribe_and_join(topic, vec![]).await?.split();
+    // Subscribe to the gossip topic. Use `subscribe` (not `subscribe_and_join`)
+    // so it returns immediately. Bootstrap peers are connected in the
+    // background; NeighborUp events fire when connections establish.
+    let (sender, mut receiver) = gossip.subscribe(topic, bootstrap).await?.split();
 
     let mut _mic_stream: Option<cpal::Stream> = None;
 
@@ -84,11 +101,9 @@ pub async fn run(
                         body: text,
                         ts: chrono::Utc::now().timestamp_millis(),
                     };
-                    // Serialize, encrypt, then broadcast.
                     let plaintext = postcard::to_stdvec(&msg)?;
                     let ciphertext = crypto.encrypt(&plaintext);
                     sender.broadcast(ciphertext.into()).await?;
-                    // Local echo (unencrypted — for our own UI).
                     let _ = evt_tx.send(AppEvent::Message(msg));
                 }
 
@@ -111,7 +126,6 @@ pub async fn run(
             Some(event) = receiver.next() => {
                 match event {
                     Ok(Event::Received(msg)) => {
-                        // Decrypt, then deserialize.
                         if let Some(plaintext) = crypto.decrypt(&msg.content) {
                             if let Ok(m) = postcard::from_bytes::<ChatMessage>(&plaintext) {
                                 let _ = evt_tx.send(AppEvent::Message(m));

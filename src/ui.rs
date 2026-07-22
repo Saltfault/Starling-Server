@@ -7,10 +7,6 @@
 //!    Rendered when `app.name` is empty.
 //! 2. **Chat** — the full chat UI with messages, a birds panel (peer list),
 //!    call status, and text input. Rendered once `app.name` is set.
-//!
-//! This module is purely presentational — it never touches the network or
-//! audio directly. State changes happen in `main.rs` in response to keyboard
-//! input or [`AppEvent`](crate::event::AppEvent)s.
 
 use crate::event::ChatMessage;
 use iroh::{EndpointAddr, EndpointId};
@@ -19,53 +15,39 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
 };
 
-/// All mutable UI state. Updated by `main.rs` in response to keyboard input
-/// and network events; read by [`draw`] every frame.
+/// All mutable UI state.
 #[derive(Default)]
 pub struct App {
     // ── Name entry phase ──────────────────────────────────────────────
-    /// The bird's confirmed display name. When empty, the UI shows the
-    /// name-entry popup instead of the chat.
     pub name: String,
-    /// Buffer for the name-entry input field.
     pub name_input: String,
 
     // ── Chat phase ────────────────────────────────────────────────────
-    /// Chat messages received (and echoed from our own broadcasts).
     pub messages: Vec<ChatMessage>,
-    /// Current text input buffer (for chat messages, not name entry).
     pub input: String,
-    /// Connected peer IDs (from gossip neighbor-up/down events).
     pub peers: Vec<EndpointId>,
-    /// Index into `peers` for the currently selected peer (for calling).
     pub selected_peer: usize,
-    /// Room code shown in the header (e.g. "BIRD00CCFF").
+    /// Room code shown in the header (e.g. "BIRDA1B2C3"). Set when the
+    /// endpoint binds (opener) or from the command line (joiner).
     pub invite: Option<String>,
-    /// Whether we are currently in a call.
+    /// Full node ID — the invite ticket that other birds use to join.
+    /// Shown in the header so the user can share it.
+    pub ticket: Option<String>,
     pub in_call: bool,
-    /// Whether the mic is muted (display state; the actual gate is an
-    /// `Arc<AtomicBool>` in `main.rs`).
     pub muted: bool,
 }
 
 impl App {
-    /// Number of connected birds.
     pub fn peer_count(&self) -> usize {
         self.peers.len()
     }
 
-    /// Cycle the selected peer to the next one in the list (wraps around).
-    /// Does nothing if no peers are connected.
     pub fn select_next_peer(&mut self) {
         if !self.peers.is_empty() {
             self.selected_peer = (self.selected_peer + 1) % self.peers.len();
         }
     }
 
-    /// Return the [`EndpointAddr`] of the currently selected peer, if any.
-    ///
-    /// The `EndpointAddr` is constructed from just the `EndpointId`; iroh's
-    /// discovery system resolves the actual address when we connect.
     pub fn selected_peer_addr(&self) -> Option<EndpointAddr> {
         self.peers
             .get(self.selected_peer)
@@ -73,12 +55,8 @@ impl App {
     }
 }
 
-// ── Top-level draw dispatcher ───────────────────────────────────────────
+// ── Draw dispatcher ─────────────────────────────────────────────────────
 
-/// Render the app state to the terminal.
-///
-/// Shows the name-entry popup if `app.name` is empty, otherwise shows the
-/// full chat UI.
 pub fn draw(f: &mut Frame, app: &App) {
     if app.name.is_empty() {
         draw_name_entry(f, app);
@@ -89,15 +67,10 @@ pub fn draw(f: &mut Frame, app: &App) {
 
 // ── Name entry ──────────────────────────────────────────────────────────
 
-/// Render the name-entry popup — a centered box asking the bird for their
-/// display name before joining the murmuration.
 fn draw_name_entry(f: &mut Frame, app: &App) {
     let area = f.area();
-
-    // Clear the whole screen first.
     f.render_widget(Clear, area);
 
-    // Center a popup box.
     let width = 48.min(area.width);
     let height = 9.min(area.height);
     let popup = Rect::new(
@@ -115,25 +88,22 @@ fn draw_name_entry(f: &mut Frame, app: &App) {
         popup,
     );
 
-    // Layout inside the popup.
     let inner = Layout::vertical([
-        Constraint::Length(1), // blank
-        Constraint::Length(1), // subtitle
-        Constraint::Length(1), // blank
-        Constraint::Length(1), // name input
-        Constraint::Length(1), // blank
-        Constraint::Length(1), // hint
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
     ])
     .margin(1)
     .split(popup);
 
     f.render_widget(Paragraph::new("Join the murmuration."), inner[1]);
-
     f.render_widget(
         Paragraph::new(format!(" Name: {}_", app.name_input)).style(Style::new().fg(Color::Yellow)),
         inner[3],
     );
-
     f.render_widget(
         Paragraph::new(" Press Enter to continue ").style(Style::new().fg(Color::DarkGray)),
         inner[5],
@@ -142,11 +112,7 @@ fn draw_name_entry(f: &mut Frame, app: &App) {
 
 // ── Chat UI ─────────────────────────────────────────────────────────────
 
-/// Parse the 6 hex digits out of a room code like "BIRD00CCFF" and return
-/// the corresponding RGB values as (r, g, b). Returns `None` if the code
-/// isn't valid.
 fn room_code_rgb(code: &str) -> Option<(u8, u8, u8)> {
-    // Expected format: BIRD + 6 hex digits (e.g. BIRD00CCFF)
     let hex = code.strip_prefix("BIRD")?;
     if hex.len() != 6 {
         return None;
@@ -157,49 +123,52 @@ fn room_code_rgb(code: &str) -> Option<(u8, u8, u8)> {
     Some((r, g, b))
 }
 
-/// Render the full chat UI: header, messages + birds panel, status, input.
 fn draw_chat(f: &mut Frame, app: &App) {
     let chunks = Layout::vertical([
-        Constraint::Length(1), // header: room code
+        Constraint::Length(1), // header
         Constraint::Min(1),    // messages + birds panel
         Constraint::Length(1), // call status
         Constraint::Length(3), // input
     ])
     .split(f.area());
 
-    // ── Header: color swatch + room code ───────────────────────────────
-    let invite = app.invite.as_deref().unwrap_or("waiting for endpoint...");
+    // ── Header: color swatch + room code + invite ticket ──────────────
+    let room_code = app.invite.as_deref().unwrap_or("waiting for endpoint...");
 
     let mut header_spans: Vec<Span> = Vec::new();
 
-    // Two half-blocks colored with the room code's RGB value, shown to the
-    // left of the code text. The filled half uses the full color; the empty
-    // half uses 50% of the color (darkened) as the background.
-    if let Some((r, g, b)) = room_code_rgb(invite) {
+    if let Some((r, g, b)) = room_code_rgb(room_code) {
         let full = Color::Rgb(r, g, b);
         let half = Color::Rgb(r / 2, g / 2, b / 2);
-        // ▀: top half = full color (fg), bottom half = 50% color (bg)
         header_spans.push(Span::styled("▀", Style::new().fg(full).bg(half)));
-        // ▄: bottom half = full color (fg), top half = 50% color (bg)
         header_spans.push(Span::styled("▄", Style::new().fg(full).bg(half)));
         header_spans.push(Span::raw(" "));
     }
 
     header_spans.push(Span::styled(
-        format!(" flock: {} ", invite),
+        format!(" {} ", room_code),
         Style::new().fg(Color::DarkGray),
     ));
 
+    // Show the invite ticket (node ID) if available, truncated to fit.
+    if let Some(ticket) = &app.ticket {
+        let max_len = 16;
+        let display = if ticket.len() > max_len {
+            format!("{}...", &ticket[..max_len])
+        } else {
+            ticket.clone()
+        };
+        header_spans.push(Span::styled(
+            format!(" invite: {} ", display),
+            Style::new().fg(Color::DarkGray),
+        ));
+    }
+
     f.render_widget(Line::from(header_spans), chunks[0]);
 
-    // ── Messages + Birds panel (horizontal split) ──────────────────────
-    let middle = Layout::horizontal([
-        Constraint::Min(1),     // messages
-        Constraint::Length(24), // birds panel
-    ])
-    .split(chunks[1]);
+    // ── Messages + Birds panel ────────────────────────────────────────
+    let middle = Layout::horizontal([Constraint::Min(1), Constraint::Length(24)]).split(chunks[1]);
 
-    // Messages list
     let items: Vec<ListItem> = app
         .messages
         .iter()
@@ -218,18 +187,18 @@ fn draw_chat(f: &mut Frame, app: &App) {
         List::new(items).block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(format!(" #global · {} birds ", app.peer_count())),
+                .title(format!(" #global . {} birds ", app.peer_count())),
         ),
         middle[0],
     );
 
-    // Birds panel — shows all connected peers, with the selected one highlighted
+    // Birds panel
     let peer_items: Vec<ListItem> = app
         .peers
         .iter()
         .enumerate()
         .map(|(i, id)| {
-            let prefix = if i == app.selected_peer { "▶ " } else { "  " };
+            let prefix = if i == app.selected_peer { "> " } else { "  " };
             ListItem::new(format!("{prefix}{}", id.fmt_short()))
         })
         .collect();
@@ -242,21 +211,21 @@ fn draw_chat(f: &mut Frame, app: &App) {
     };
     f.render_widget(peer_list, middle[1]);
 
-    // ── Status: call state + keybindings ───────────────────────────────
+    // ── Status ────────────────────────────────────────────────────────
     let status = if app.in_call {
         format!(
-            "🔊 in call · {} · Ctrl+K to hang up",
+            " in call . {} . Ctrl+K to hang up",
             if app.muted { "muted" } else { "live" }
         )
     } else {
-        "○ idle · Ctrl+K to call · Tab to cycle · Ctrl+M to mute".into()
+        " idle . Ctrl+K to call . Tab to cycle . Ctrl+M to mute".into()
     };
     f.render_widget(
         Paragraph::new(status).style(Style::new().fg(Color::Rgb(111, 174, 157))),
         chunks[2],
     );
 
-    // ── Input ──────────────────────────────────────────────────────────
+    // ── Input ─────────────────────────────────────────────────────────
     f.render_widget(
         Paragraph::new(app.input.as_str())
             .block(Block::default().borders(Borders::ALL).title(" message ")),

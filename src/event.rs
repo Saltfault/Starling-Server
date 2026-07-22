@@ -29,6 +29,9 @@ pub enum AppEvent {
     PeerConnected(EndpointId),
     /// A gossip neighbor went offline.
     PeerDisconnected(EndpointId),
+    /// The endpoint finished binding. Carries the node ID (the shareable
+    /// invite ticket). The room code is derived from this for display.
+    Ticket(String),
     /// A 20 ms Opus voice frame arrived from a remote peer.
     VoiceFrame(Vec<u8>),
 }
