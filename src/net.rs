@@ -119,6 +119,8 @@ pub async fn run(
 
     let gossip = Gossip::builder().spawn(endpoint.clone());
 
+    let history: crate::sync::History = Default::default();
+
     let _router = Router::builder(endpoint.clone())
         .accept(GOSSIP_ALPN, gossip.clone())
         .accept(
@@ -133,9 +135,23 @@ pub async fn run(
                 evt_tx: evt_tx.clone(),
             },
         )
+        .accept(
+            crate::sync::SYNC_ALPN,
+            crate::sync::SyncProto {
+                history: history.clone(),
+            },
+        )
         .spawn();
 
     let (sender, mut receiver) = gossip.subscribe(topic, bootstrap).await?.split();
+
+    // Joiners ask the opener for messages they missed.
+    if opener_id != my_node_id {
+        let (ep, tx) = (endpoint.clone(), evt_tx.clone());
+        tokio::spawn(async move {
+            let _ = crate::sync::backfill(ep, opener_id, 0, tx).await;
+        });
+    }
 
     let mut _mic_stream: Option<cpal::Stream> = None;
     let mut _cam_thread: Option<std::thread::JoinHandle<()>> = None;
@@ -151,7 +167,8 @@ pub async fn run(
                         ts: chrono::Utc::now().timestamp_millis(),
                     };
                     broadcast_payload(&sender, &crypto, &GossipPayload::Chat(msg.clone())).await?;
-                    let _ = evt_tx.send(AppEvent::Message(msg));
+                    let _ = evt_tx.send(AppEvent::Message(msg.clone()));
+                    history.lock().unwrap().push(msg);
                 }
 
                 Command::StartCall(addr) => {
@@ -194,6 +211,7 @@ pub async fn run(
                         if let Some(plaintext) = crypto.decrypt(&msg.content) {
                             match postcard::from_bytes::<GossipPayload>(&plaintext) {
                                 Ok(GossipPayload::Chat(m)) => {
+                                    history.lock().unwrap().push(m.clone());
                                     let _ = evt_tx.send(AppEvent::Message(m));
                                 }
                                 Ok(GossipPayload::Profile { id, name }) => {

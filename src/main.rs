@@ -9,6 +9,7 @@ mod net;
 mod opus_ffi;
 mod playback;
 mod setup;
+mod sync;
 mod ui;
 mod util;
 mod video;
@@ -158,8 +159,14 @@ async fn main() -> anyhow::Result<()> {
                         app.video_frame = Some(img.to_rgb8());
                     }
                 }
-                AppEvent::HistoryChunk(msgs) => {
-                    app.messages.extend(msgs);
+                AppEvent::HistoryChunk(old) => {
+                    // Prepend, skipping anything we already have (dedup by id).
+                    let known: std::collections::HashSet<_> =
+                        app.messages.iter().map(|m| m.id.clone()).collect();
+                    let mut fresh: Vec<_> =
+                        old.into_iter().filter(|m| !known.contains(&m.id)).collect();
+                    fresh.extend(std::mem::take(&mut app.messages));
+                    app.messages = fresh;
                 }
             }
         }
