@@ -6,9 +6,13 @@ use serde::{Deserialize, Serialize};
 
 /// UI → Network: things the user does.
 pub enum Command {
+    /// Send a chat text message to the flock.
     SendText(String),
+    /// Start a voice call with a peer.
     StartCall(EndpointAddr),
+    /// End the current call.
     HangUp,
+    /// Shut down the network layer.
     Quit,
 }
 
@@ -32,19 +36,21 @@ pub enum AppEvent {
 /// A chat message that travels over the gossip layer.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChatMessage {
+    /// Unique message ID (UUID).
     pub id: String,
+    /// Sender's display name.
     pub author: String,
+    /// Message text.
     pub body: String,
+    /// Unix millisecond timestamp.
     pub ts: i64,
 }
 
 /// Payload types for gossip messages (encrypted before broadcast).
 #[derive(Clone, Serialize, Deserialize)]
 pub enum GossipPayload {
+    /// A chat message.
     Chat(ChatMessage),
     /// A peer announcing their display name.
-    Profile {
-        id: EndpointId,
-        name: String,
-    },
+    Profile { id: EndpointId, name: String },
 }

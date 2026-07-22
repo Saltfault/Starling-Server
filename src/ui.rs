@@ -10,31 +10,44 @@ use std::collections::HashMap;
 
 #[derive(Default)]
 pub struct App {
+    /// Display name shown to other peers.
     pub name: String,
+    /// Chat messages received from peers.
     pub messages: Vec<ChatMessage>,
+    /// Text currently being typed in the message box.
     pub input: String,
+    /// Connected remote peers, by EndpointId.
     pub peers: Vec<EndpointId>,
+    /// Index into `peers` of the currently highlighted peer.
     pub selected_peer: usize,
+    /// Room/invite code shown in the invite popup.
     pub invite: Option<String>,
+    /// This node's full encoded node ID (source of the color code).
     pub node_id: Option<String>,
+    /// Whether the invite popup is currently displayed.
     pub show_invite: bool,
+    /// Whether an active voice call is in progress.
     pub in_call: bool,
+    /// Whether the local microphone is muted.
     pub muted: bool,
     /// Maps peer EndpointId → display name (from profile announcements).
     pub peer_names: HashMap<EndpointId, String>,
 }
 
 impl App {
+    /// Total birds in the room: the local user plus connected peers.
     pub fn bird_count(&self) -> usize {
         self.peers.len() + 1
     }
 
+    /// Cycle selection to the next peer, wrapping around.
     pub fn select_next_peer(&mut self) {
         if !self.peers.is_empty() {
             self.selected_peer = (self.selected_peer + 1) % self.peers.len();
         }
     }
 
+    /// Address of the currently selected peer, if any.
     pub fn selected_peer_addr(&self) -> Option<EndpointAddr> {
         self.peers
             .get(self.selected_peer)
@@ -59,20 +72,11 @@ pub fn draw(f: &mut Frame, app: &App) {
     ])
     .split(f.area());
 
-    // ── Header: all color swatches + full code ────────────────────────
+    // ── Header: color swatches + full node code ───────────────────────
     let header = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(chunks[0]);
 
     let full_code = app.node_id.as_deref().unwrap_or("");
-    let colors = parse_color_code(full_code);
-
-    let mut swatch_spans: Vec<Span> = Vec::new();
-    for (r, g, b) in &colors {
-        let full = Color::Rgb(*r, *g, *b);
-        let half = Color::Rgb(r / 2, g / 2, b / 2);
-        swatch_spans.push(Span::styled("\u{2580}", Style::new().fg(full).bg(half)));
-        swatch_spans.push(Span::styled("\u{2584}", Style::new().fg(full).bg(half)));
-        swatch_spans.push(Span::raw(" "));
-    }
+    let mut swatch_spans = color_swatches(full_code);
     if swatch_spans.is_empty() {
         swatch_spans.push(Span::styled(
             " waiting for endpoint...",
@@ -165,9 +169,9 @@ fn draw_invite_popup(f: &mut Frame, app: &App) {
     f.render_widget(Clear, area);
 
     let code = app.node_id.as_deref().unwrap_or("waiting for endpoint...");
-    let colors = parse_color_code(code);
+    let swatch_spans = color_swatches(code);
 
-    let swatch_line_len = colors.len() * 3;
+    let swatch_line_len = swatch_spans.len();
     let code_len = code.len();
     let content_width = swatch_line_len.max(code_len).max(40) + 4;
     let width = content_width.min(area.width as usize) as u16;
@@ -191,28 +195,8 @@ fn draw_invite_popup(f: &mut Frame, app: &App) {
         horizontal: 2,
     });
 
-    let chunks = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-    ])
-    .split(inner);
+    let chunks = Layout::vertical(vec![Constraint::Length(1); 10]).split(inner);
 
-    let mut swatch_spans: Vec<Span> = Vec::new();
-    for (r, g, b) in &colors {
-        let full = Color::Rgb(*r, *g, *b);
-        let half = Color::Rgb(r / 2, g / 2, b / 2);
-        swatch_spans.push(Span::styled("\u{2580}", Style::new().fg(full).bg(half)));
-        swatch_spans.push(Span::styled("\u{2584}", Style::new().fg(full).bg(half)));
-        swatch_spans.push(Span::raw(" "));
-    }
     f.render_widget(Line::from(swatch_spans), chunks[1]);
 
     let mid = code.len() / 2;
@@ -245,6 +229,26 @@ fn draw_invite_popup(f: &mut Frame, app: &App) {
     );
 }
 
+/// Build the color-swatch line for a node ID: pairs of ▀▄ glyphs (each
+/// rendered full-bright over a dimmed copy) separated by spaces, one per
+/// 6-hex color group in the code. Returns an empty vec when no colors
+/// have been parsed yet.
+///
+/// All spans are built from string literals, so they carry a `'static`
+/// lifetime and don't borrow from `code`.
+fn color_swatches(code: &str) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    for (r, g, b) in parse_color_code(code) {
+        let full = Color::Rgb(r, g, b);
+        let half = Color::Rgb(r / 2, g / 2, b / 2);
+        spans.push(Span::styled("\u{2580}", Style::new().fg(full).bg(half)));
+        spans.push(Span::styled("\u{2584}", Style::new().fg(full).bg(half)));
+        spans.push(Span::raw(" "));
+    }
+    spans
+}
+
+/// Parse the 6-hex color groups out of a node ID (e.g. "BIRD-aabbcc-...").
 fn parse_color_code(code: &str) -> Vec<(u8, u8, u8)> {
     let mut colors = Vec::new();
     for group in code.split('-') {

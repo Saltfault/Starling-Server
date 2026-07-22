@@ -69,30 +69,23 @@ async fn main() -> anyhow::Result<()> {
         app.node_id = Some(net::encode_node_id(node_id));
     }
 
-    let (name, input_device, output_device) = if let Some(p) = &profile {
-        app.name = p.name.clone();
-        (
-            p.name.clone(),
-            p.input_device.clone(),
-            p.output_device.clone(),
-        )
-    } else {
-        match setup::run_setup(&mut term)? {
-            Some(p) => {
-                app.name = p.name.clone();
-                (
-                    p.name.clone(),
-                    p.input_device.clone(),
-                    p.output_device.clone(),
-                )
-            }
+    // Load the profile from disk, or run the setup wizard to create one.
+    let profile = match profile {
+        Some(p) => p,
+        None => match setup::run_setup(&mut term)? {
+            Some(p) => p,
             None => {
                 disable_raw_mode()?;
                 execute!(term.backend_mut(), LeaveAlternateScreen)?;
                 return Ok(());
             }
-        }
+        },
     };
+
+    let name = profile.name;
+    let input_device = profile.input_device;
+    let output_device = profile.output_device;
+    app.name = name.clone();
 
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<Command>();
     let (evt_tx, mut evt_rx) = mpsc::unbounded_channel::<AppEvent>();
@@ -160,8 +153,6 @@ async fn main() -> anyhow::Result<()> {
 
         if ct_event::poll(std::time::Duration::from_millis(50))? {
             if let Event::Key(k) = ct_event::read()? {
-                // On Windows, crossterm emits Press, Release, and Repeat
-                // events. Only handle Press to avoid doubled characters.
                 if k.kind != KeyEventKind::Press {
                     continue;
                 }
@@ -222,6 +213,8 @@ async fn main() -> anyhow::Result<()> {
 
                     KeyCode::Esc => {
                         let _ = cmd_tx.send(Command::Quit);
+                        // Give the network task time to drain the Quit
+                        // command and shut down before the terminal exits.
                         tokio::time::sleep(Duration::from_millis(500)).await;
                         break;
                     }

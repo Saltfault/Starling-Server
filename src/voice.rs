@@ -3,18 +3,17 @@
 //!
 //! Uses stereo (2-channel) audio for higher quality voice calls.
 
-use crate::opus_ffi::{Application, Channels, Encoder};
+use crate::opus_ffi::{Channels, Encoder};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc;
 
-const SAMPLE_RATE: u32 = 48_000;
-const CHANNELS: usize = 2;
-/// Samples per channel per 20ms frame at 48kHz.
-const FRAME_SAMPLES: usize = 960;
-/// Total interleaved samples per frame (samples_per_channel * channels).
-const FRAME: usize = FRAME_SAMPLES * CHANNELS;
+pub(crate) const SAMPLE_RATE: u32 = 48_000;
+pub(crate) const CHANNELS: usize = 2;
+/// Samples per channel per 20 ms frame at 48 kHz.
+pub(crate) const FRAME_SAMPLES: usize = 960;
+pub(crate) const FRAME: usize = FRAME_SAMPLES * CHANNELS;
 
 pub fn start_capture(
     net_tx: mpsc::UnboundedSender<Vec<u8>>,
@@ -31,22 +30,11 @@ fn start_capture_inner(
 ) -> anyhow::Result<cpal::Stream> {
     let host = cpal::default_host();
 
-    let device = if let Some(name) = device_name {
-        let mut found = None;
-        if let Ok(devices) = host.input_devices() {
-            for d in devices {
-                let dname = d.to_string();
-                if dname == name {
-                    found = Some(d);
-                    break;
-                }
-            }
-        }
-        found
-    } else {
-        None
-    }
-    .or_else(|| host.default_input_device())
+    let device = find_device(
+        device_name,
+        host.input_devices().ok(),
+        host.default_input_device(),
+    )
     .ok_or_else(|| anyhow::anyhow!("no microphone input device found"))?;
 
     let cfg = cpal::StreamConfig {
@@ -55,7 +43,7 @@ fn start_capture_inner(
         buffer_size: cpal::BufferSize::Default,
     };
 
-    let mut enc = Encoder::new(SAMPLE_RATE, Channels::Stereo, Application::Voip)?;
+    let mut enc = Encoder::new(SAMPLE_RATE, Channels::Stereo)?;
     let mut acc: Vec<f32> = Vec::with_capacity(FRAME);
 
     let stream = device.build_input_stream(
@@ -82,3 +70,15 @@ fn start_capture_inner(
     Ok(stream)
 }
 
+/// Find an audio device by name, falling back to the host default when the
+/// name is `None` or no listed device matches.
+pub(crate) fn find_device<I: Iterator<Item = cpal::Device>>(
+    name: Option<&str>,
+    devices: Option<I>,
+    default: Option<cpal::Device>,
+) -> Option<cpal::Device> {
+    name.and_then(|target| {
+        devices.and_then(|mut iter| iter.find(|d| d.to_string() == target))
+    })
+    .or(default)
+}

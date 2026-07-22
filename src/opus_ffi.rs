@@ -25,15 +25,14 @@ use bindings::{
     opus_encode_float, opus_encoder_create, opus_encoder_destroy,
 };
 
-/// Opus encoder. Encodes f32 PCM to compressed Opus bytes.
 pub struct Encoder {
     inner: *mut OpusEncoder,
     channels: usize,
 }
 
 impl Encoder {
-    /// Create a new encoder for the given sample rate and channel count.
-    pub fn new(sample_rate: u32, channels: Channels, _app: Application) -> Result<Self, Error> {
+    /// Creates an encoder tuned for VoIP (`OPUS_APPLICATION_VOIP`).
+    pub fn new(sample_rate: u32, channels: Channels) -> Result<Self, Error> {
         let mut error: c_int = 0;
         let inner = unsafe {
             opus_encoder_create(
@@ -52,8 +51,8 @@ impl Encoder {
         })
     }
 
-    /// Encode a frame of interleaved f32 PCM samples. Returns the number of
-    /// encoded bytes. `pcm` must contain `frame_size * channels` samples.
+    /// `pcm` must hold `frame_size * channels` interleaved samples. Returns the
+    /// encoded byte count.
     pub fn encode_float(&mut self, pcm: &[f32], output: &mut [u8]) -> Result<usize, Error> {
         let frame_size = pcm.len() / self.channels;
         let n = unsafe {
@@ -80,14 +79,12 @@ impl Drop for Encoder {
 
 unsafe impl Send for Encoder {}
 
-/// Opus decoder. Decodes compressed Opus bytes to f32 PCM samples.
 pub struct Decoder {
     inner: *mut OpusDecoder,
     channels: usize,
 }
 
 impl Decoder {
-    /// Create a new decoder for the given sample rate and channel count.
     pub fn new(sample_rate: u32, channels: Channels) -> Result<Self, Error> {
         let mut error: c_int = 0;
         let inner =
@@ -101,9 +98,8 @@ impl Decoder {
         })
     }
 
-    /// Decode an Opus packet to interleaved f32 PCM. Returns the number of
-    /// decoded samples per channel. `output` must be large enough for
-    /// `frame_size * channels` samples.
+    /// `output` must hold `frame_size * channels` samples. Returns decoded
+    /// samples *per channel*.
     pub fn decode_float(
         &mut self,
         data: &[u8],
@@ -136,7 +132,6 @@ impl Drop for Decoder {
 
 unsafe impl Send for Decoder {}
 
-/// Channel count.
 #[derive(Clone, Copy)]
 #[allow(dead_code)]
 pub enum Channels {
@@ -144,13 +139,6 @@ pub enum Channels {
     Stereo = 2,
 }
 
-/// Application mode (we only use VoIP).
-#[derive(Clone, Copy)]
-pub enum Application {
-    Voip,
-}
-
-/// Opus error.
 pub struct Error {
     pub code: c_int,
 }

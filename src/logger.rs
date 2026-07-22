@@ -5,7 +5,7 @@
 //! Log layout:
 //! ```text
 //! logs/
-//!   latest.log              ← current session
+//!   latest.log                   ← current session
 //!   2025-07-21_14-32-05.log.gz   ← previous session, gzipped
 //!   2025-07-21_13-01-22.log.gz
 //! ```
@@ -29,14 +29,14 @@ static LOG_DIR: OnceLock<PathBuf> = OnceLock::new();
 /// 1. Creates the `logs/` directory if it doesn't exist.
 /// 2. If `logs/latest.log` exists from a previous session, gzips it to
 ///    `logs/<timestamp>.log.gz` and removes the original.
-/// 3. Creates a fresh `logs/latest.log` with a startup banner.
+/// 3. Creates a fresh `latest.log` with a startup banner.
 pub fn init() {
     let log_dir = PathBuf::from("logs");
     fs::create_dir_all(&log_dir).ok();
 
     let latest = log_dir.join("latest.log");
 
-    // Archive the previous log if it exists.
+    // Archive the previous session's log.
     if latest.exists() {
         let timestamp = chrono::Local::now().format("%Y-%m-%d_%H-%M-%S");
         let gz_path = log_dir.join(format!("{timestamp}.log.gz"));
@@ -63,32 +63,27 @@ pub fn init() {
     );
 }
 
-/// Log an error message with a timestamp.
-///
-/// This is thread-safe and can be called from audio callbacks or network
-/// tasks. If the logger hasn't been initialized, the message is silently
-/// dropped.
-pub fn error(msg: &str) {
+/// Write a line to `latest.log`. Silently does nothing if [`init`] wasn't
+/// called. `level` includes trailing spacing (e.g. `"ERROR: "`) so messages
+/// align across levels.
+fn log(level: &str, msg: &str) {
     let Some(dir) = LOG_DIR.get() else { return };
     let path = dir.join("latest.log");
 
     let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-    let line = format!("[{timestamp}] ERROR: {msg}\n");
+    let line = format!("[{timestamp}] {level}{msg}\n");
 
     if let Ok(mut file) = OpenOptions::new().append(true).create(true).open(&path) {
         let _ = file.write_all(line.as_bytes());
     }
 }
 
+/// Log an error message with a timestamp.
+pub fn error(msg: &str) {
+    log("ERROR: ", msg);
+}
+
 /// Log a warning message with a timestamp.
 pub fn warn(msg: &str) {
-    let Some(dir) = LOG_DIR.get() else { return };
-    let path = dir.join("latest.log");
-
-    let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-    let line = format!("[{timestamp}] WARN:  {msg}\n");
-
-    if let Ok(mut file) = OpenOptions::new().append(true).create(true).open(&path) {
-        let _ = file.write_all(line.as_bytes());
-    }
+    log("WARN:  ", msg);
 }

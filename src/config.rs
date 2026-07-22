@@ -1,18 +1,17 @@
-//! User profile: display name, audio device preferences, and a portable
-//! 32-hex-digit code for transferring the name between machines.
+//! User profile persistence: display name and audio device preferences,
+//! saved to disk as a postcard-serialized binary file.
 //!
-//! The profile is saved to disk as a postcard-serialized binary file:
 //! - Linux/macOS: `~/.config/starling/profile.bin`
 //! - Windows:     `%APPDATA%\starling\profile.bin`
 //!
-//! The 32-digit code encodes just the name (up to 15 bytes) — device
-//! settings are machine-specific and don't transfer. The code is not
-//! encrypted (the name isn't secret); it's just a compact encoding.
+//! The display name can also be shared between machines as a compact
+//! 32-hex-digit code (see [`Profile::to_code`]). Device settings are
+//! machine-specific and don't transfer.
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-/// User settings. Saved to disk and loaded on startup.
+/// User settings persisted across sessions.
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct Profile {
     /// Display name shown next to messages.
@@ -85,4 +84,3 @@ impl Profile {
         })
     }
 }
-

@@ -22,18 +22,21 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use tokio::sync::mpsc;
 
+/// Derive a deterministic gossip [`TopicId`] from a name via SHA-256.
 pub fn topic_for(name: &str) -> TopicId {
     use sha2::{Digest, Sha256};
     let hash = Sha256::digest(name.as_bytes());
     TopicId::from_bytes(hash.into())
 }
 
+/// Derive a short room code from a node ID (first 3 bytes as hex).
 pub fn room_code_from_node_id(node_id: &EndpointId) -> String {
     let bytes = node_id.as_bytes();
     let hex: String = (0..3).map(|i| format!("{:02X}", bytes[i])).collect();
     format!("BIRD{hex}")
 }
 
+/// Encode a node ID as a shareable ticket string (`BIRD-RRGGBB-...`).
 pub fn encode_node_id(node_id: &EndpointId) -> String {
     let bytes = node_id.as_bytes();
     let mut padded = bytes.to_vec();
@@ -47,6 +50,7 @@ pub fn encode_node_id(node_id: &EndpointId) -> String {
     format!("BIRD-{}", colors.join("-"))
 }
 
+/// Decode a ticket string back into a node ID, or `None` if malformed.
 pub fn decode_node_id(code: &str) -> Option<EndpointId> {
     let code = code
         .strip_prefix("BIRD-")
@@ -70,7 +74,7 @@ pub fn decode_node_id(code: &str) -> Option<EndpointId> {
     EndpointId::from_bytes(&arr).ok()
 }
 
-/// Helper: encrypt, serialize, and broadcast a gossip payload.
+/// Encrypt, serialize, and broadcast a gossip payload.
 async fn broadcast_payload(
     sender: &iroh_gossip::api::GossipSender,
     crypto: &FlockCrypto,
@@ -82,6 +86,15 @@ async fn broadcast_payload(
     Ok(())
 }
 
+/// Run the network loop: bind an endpoint, join the flock's gossip topic, and
+/// shuttle [`Command`]s and [`AppEvent`]s until [`Command::Quit`] arrives.
+///
+/// * `bootstrap` - known peers to dial when joining an existing flock.
+/// * `cmd_rx` - commands from the UI.
+/// * `evt_tx` - events back to the UI.
+/// * `muted` - shared flag toggled by the UI to mute the mic.
+/// * `name` - our display name, announced to peers and used as chat author.
+/// * `input_device` - optional CPAL input device name for the mic.
 pub async fn run(
     bootstrap: Vec<EndpointId>,
     mut cmd_rx: mpsc::UnboundedReceiver<Command>,
@@ -90,8 +103,6 @@ pub async fn run(
     name: String,
     input_device: Option<String>,
 ) -> anyhow::Result<()> {
-    crate::logger::warn("binding endpoint...");
-
     let endpoint = Endpoint::bind(presets::N0).await?;
     endpoint.online().await;
 
@@ -121,8 +132,6 @@ pub async fn run(
         .spawn();
 
     let (sender, mut receiver) = gossip.subscribe(topic, bootstrap).await?.split();
-
-    crate::logger::warn("subscribed to gossip topic");
 
     let mut _mic_stream: Option<cpal::Stream> = None;
 
@@ -201,6 +210,7 @@ pub async fn run(
     Ok(())
 }
 
+/// Protocol handler for incoming voice call connections.
 #[derive(Debug)]
 struct VoiceProto {
     evt_tx: mpsc::UnboundedSender<AppEvent>,

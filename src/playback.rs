@@ -4,14 +4,10 @@
 //! Uses stereo (2-channel) audio for higher quality voice calls.
 
 use crate::opus_ffi::{Channels, Decoder};
+use crate::voice::{CHANNELS, FRAME, SAMPLE_RATE, find_device};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use ringbuf::{CachingCons, CachingProd, SharedRb, storage::Heap, traits::*};
 
-const SAMPLE_RATE: u32 = 48_000;
-const CHANNELS: usize = 2;
-const FRAME_SAMPLES: usize = 960;
-/// Total interleaved samples per frame.
-const FRAME: usize = FRAME_SAMPLES * CHANNELS;
 /// Ring buffer capacity: ~2 seconds of stereo audio.
 const BUFFER_CAPACITY: usize = SAMPLE_RATE as usize * CHANNELS * 2;
 
@@ -32,22 +28,11 @@ impl Playback {
     fn new_inner(device_name: Option<&str>) -> anyhow::Result<Self> {
         let host = cpal::default_host();
 
-        let device = if let Some(name) = device_name {
-            let mut found = None;
-            if let Ok(devices) = host.output_devices() {
-                for d in devices {
-                    let dname = d.to_string();
-                    if dname == name {
-                        found = Some(d);
-                        break;
-                    }
-                }
-            }
-            found
-        } else {
-            None
-        }
-        .or_else(|| host.default_output_device())
+        let device = find_device(
+            device_name,
+            host.output_devices().ok(),
+            host.default_output_device(),
+        )
         .ok_or_else(|| anyhow::anyhow!("no audio output device found"))?;
 
         let cfg = cpal::StreamConfig {
@@ -84,7 +69,7 @@ impl Playback {
     pub fn push_opus(&mut self, bytes: &[u8]) {
         let mut pcm = [0f32; FRAME];
         match self.decoder.decode_float(bytes, &mut pcm, false) {
-            // decode_float returns samples per channel; total = n * channels
+            // decode_float returns samples per channel; multiply for the total.
             Ok(n) => {
                 let total = n * CHANNELS;
                 self.producer.push_slice(&pcm[..total]);

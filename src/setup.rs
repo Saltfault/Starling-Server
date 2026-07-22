@@ -25,24 +25,39 @@ use std::time::{Duration, Instant};
 
 /// Which step of the setup wizard we're on.
 enum Phase {
+    /// Checking for required system packages.
     DependencyCheck,
+    /// Configuring the WSL2 PulseAudio bridge (Linux under WSL only).
     WslAudio,
+    /// Optionally loading an existing profile from its 32-digit code.
     CodeEntry,
+    /// Entering the user's display name.
     NameEntry,
+    /// Choosing the microphone.
     InputDevice,
+    /// Choosing the speaker or headphones.
     OutputDevice,
+    /// Reviewing choices and saving the profile.
     Summary,
 }
 
 /// Setup wizard state.
 struct SetupApp {
+    /// Current wizard step.
     phase: Phase,
+    /// Profile being built (seeded from any saved profile).
     profile: Profile,
+    /// Text buffer for the display-name input.
     name_input: String,
+    /// Text buffer for the profile-code input.
     code_input: String,
+    /// Available microphone names.
     input_devices: Vec<String>,
+    /// Available speaker names.
     output_devices: Vec<String>,
+    /// Selected index into `input_devices`.
     selected_input: usize,
+    /// Selected index into `output_devices`.
     selected_output: usize,
     /// List of missing system dependencies.
     missing_deps: Vec<String>,
@@ -56,8 +71,8 @@ struct SetupApp {
 
 impl SetupApp {
     fn new() -> Self {
-        let input_devices = suppress_stderr(list_input_devices);
-        let output_devices = suppress_stderr(list_output_devices);
+        let input_devices = suppress_stderr(|| list_devices(true));
+        let output_devices = suppress_stderr(|| list_devices(false));
         let profile = Profile::load().unwrap_or_default();
 
         let missing_deps = check_dependencies();
@@ -96,8 +111,7 @@ impl SetupApp {
     }
 }
 
-// ── Dependency checking ─────────────────────────────────────────────────
-
+/// Check whether a command is available on PATH.
 fn command_exists(cmd: &str) -> bool {
     std::process::Command::new("sh")
         .args(["-c", &format!("command -v {cmd}")])
@@ -106,6 +120,7 @@ fn command_exists(cmd: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Check whether a pkg-config library is installed.
 fn pkg_config_exists(lib: &str) -> bool {
     std::process::Command::new("pkg-config")
         .args(["--exists", lib])
@@ -114,6 +129,7 @@ fn pkg_config_exists(lib: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Return the list of system dependencies missing on the current platform.
 fn check_dependencies() -> Vec<String> {
     let mut missing = Vec::new();
 
@@ -136,6 +152,7 @@ fn check_dependencies() -> Vec<String> {
     missing
 }
 
+/// Build the install command for the detected package manager, if any.
 fn install_command() -> Option<String> {
     if command_exists("apt-get") {
         Some("sudo apt-get update && sudo apt-get install -y build-essential pkg-config libasound2-dev libpulse-dev".into())
@@ -182,38 +199,30 @@ fn run_shell_command(
     success
 }
 
-// ── Audio device listing ────────────────────────────────────────────────
-
-fn list_input_devices() -> Vec<String> {
+/// Enumerate audio devices (input or output), prefixed with "System Default".
+fn list_devices(is_input: bool) -> Vec<String> {
     let host = cpal::default_host();
-    let mut devices = vec!["System Default".to_string()];
-    if let Ok(iter) = host.input_devices() {
-        for device in iter {
+    // Collect into a Vec so the input and output iterator types unify.
+    let devices = if is_input {
+        host.input_devices().map(|i| i.collect::<Vec<_>>())
+    } else {
+        host.output_devices().map(|i| i.collect::<Vec<_>>())
+    };
+
+    let mut names = vec!["System Default".to_string()];
+    if let Ok(devices) = devices {
+        for device in devices {
             let name = device.to_string();
             if !name.is_empty() {
-                devices.push(name);
+                names.push(name);
             }
         }
     }
-    devices
+    names
 }
 
-fn list_output_devices() -> Vec<String> {
-    let host = cpal::default_host();
-    let mut devices = vec!["System Default".to_string()];
-    if let Ok(iter) = host.output_devices() {
-        for device in iter {
-            let name = device.to_string();
-            if !name.is_empty() {
-                devices.push(name);
-            }
-        }
-    }
-    devices
-}
-
-// ── Main setup loop ─────────────────────────────────────────────────────
-
+/// Run the interactive setup wizard, returning the saved profile or `None`
+/// if the user cancels.
 pub fn run_setup(
     term: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
 ) -> anyhow::Result<Option<Profile>> {
@@ -367,8 +376,7 @@ pub fn run_setup(
     }
 }
 
-// ── Rendering ───────────────────────────────────────────────────────────
-
+/// Render the current setup phase inside the centered popup.
 fn draw(f: &mut Frame, app: &SetupApp) {
     let area = f.area();
     f.render_widget(Clear, area);
