@@ -13,13 +13,15 @@
 //!                          ▼                        ▼
 //! ┌──────────────────────────────────────────────────────────────────┐
 //! │ net.rs (network task)                                            │
-//! │   gossip for chat · QUIC datagrams for voice                     │
+//! │   gossip for chat (E2E encrypted) · QUIC datagrams for voice     │
 //! │   mic capture (voice.rs) → place_call (call.rs)                  │
 //! └──────────────────────────────────────────────────────────────────┘
 //! ```
 //!
-//! The app starts in **name-entry mode**: a popup asks for the bird's display
-//! name. Once confirmed, the network task is spawned and the chat UI begins.
+//! Subcommands:
+//! - `starling setup` — configure profile (name, audio devices, code)
+//! - `starling open`  — start a new flock
+//! - `starling join <code>` — join an existing flock
 //!
 //! Keybindings (chat mode):
 //!
@@ -33,10 +35,13 @@
 //! | `Esc`      | Quit                            |
 
 mod call;
+mod config;
+mod crypto;
 mod event;
 mod logger;
 mod net;
 mod playback;
+mod setup;
 mod ui;
 mod util;
 mod voice;
@@ -62,63 +67,82 @@ fn generate_room_code() -> String {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // ── Initialize logging ────────────────────────────────────────────
-    // Zip the previous latest.log and start a fresh one.
     logger::init();
 
-    // ── Parse CLI args: `starling open` or `starling join <code>` ─────
     let args: Vec<String> = std::env::args().collect();
+
+    // ── Subcommand: `starling setup` ──────────────────────────────────
+    if args.get(1).map(String::as_str) == Some("setup") {
+        enable_raw_mode()?;
+        let mut stdout = std::io::stdout();
+        execute!(stdout, EnterAlternateScreen)?;
+        let mut term = ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(stdout))?;
+        setup::run_setup(&mut term)?;
+        disable_raw_mode()?;
+        execute!(term.backend_mut(), LeaveAlternateScreen)?;
+        return Ok(());
+    }
+
+    // ── Subcommand: `starling open` or `starling join <code>` ─────────
     let (topic, room_code) = match args.get(1).map(String::as_str) {
         Some("join") => {
             let code = args[2].clone();
             (net::topic_for(&format!("starling/flock/{code}")), code)
         }
         _ => {
-            // "open" — generate a random room code
             let code = generate_room_code();
             (net::topic_for(&format!("starling/flock/{code}")), code)
         }
     };
 
-    // ── Set up the terminal ───────────────────────────────────────────
+    // E2E encryption context derived from the room code.
+    let flock_crypto = crypto::FlockCrypto::from_room_code(&room_code);
+
+    // Load profile from disk (if it exists).
+    let profile = config::Profile::load();
+
+    // Set up the terminal.
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let mut term = ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(stdout))?;
     let mut app = App::default();
-
-    // The room code is the invite — display it in the header immediately.
     app.invite = Some(room_code);
 
-    // ── Phase 1: Name entry ───────────────────────────────────────────
-    //
-    // Show a popup asking for the bird's display name. The network task
-    // hasn't started yet — we need the name before spawning it.
-    loop {
-        term.draw(|f| ui::draw(f, &app))?;
-
-        if ct_event::poll(std::time::Duration::from_millis(50))? {
-            if let Event::Key(k) = ct_event::read()? {
-                match k.code {
-                    KeyCode::Enter if !app.name_input.is_empty() => {
-                        app.name = std::mem::take(&mut app.name_input);
-                        break;
+    // If a profile exists, use its name. Otherwise, show the name popup.
+    let (name, input_device, output_device) = if let Some(p) = &profile {
+        app.name = p.name.clone();
+        (
+            p.name.clone(),
+            p.input_device.clone(),
+            p.output_device.clone(),
+        )
+    } else {
+        // Name entry popup (fallback when no profile exists).
+        loop {
+            term.draw(|f| ui::draw(f, &app))?;
+            if ct_event::poll(std::time::Duration::from_millis(50))? {
+                if let Event::Key(k) = ct_event::read()? {
+                    match k.code {
+                        KeyCode::Enter if !app.name_input.is_empty() => {
+                            app.name = std::mem::take(&mut app.name_input);
+                            break;
+                        }
+                        KeyCode::Char(c) => app.name_input.push(c),
+                        KeyCode::Backspace => {
+                            app.name_input.pop();
+                        }
+                        _ => {}
                     }
-                    KeyCode::Char(c) => app.name_input.push(c),
-                    KeyCode::Backspace => {
-                        app.name_input.pop();
-                    }
-                    _ => {}
                 }
             }
         }
-    }
+        (app.name.clone(), None, None)
+    };
 
-    // ── Phase 2: Start the network task ───────────────────────────────
+    // Start the network task with E2E crypto and mic device preference.
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<Command>();
     let (evt_tx, mut evt_rx) = mpsc::unbounded_channel::<AppEvent>();
-
-    // Shared mute flag (UI toggles it, mic callback reads it).
     let muted_flag = Arc::new(AtomicBool::new(false));
 
     tokio::spawn(net::run(
@@ -126,11 +150,13 @@ async fn main() -> anyhow::Result<()> {
         cmd_rx,
         evt_tx,
         muted_flag.clone(),
-        app.name.clone(),
+        name,
+        flock_crypto,
+        input_device,
     ));
 
-    // ── Set up audio playback (optional — app works without it) ───────
-    let mut playback = match playback::Playback::new() {
+    // Set up audio playback with device preference.
+    let mut playback = match playback::Playback::new(output_device.as_deref()) {
         Ok(p) => Some(p),
         Err(e) => {
             logger::warn(&format!("audio playback unavailable: {e}"));
@@ -138,11 +164,10 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    // ── Phase 3: Main chat loop ───────────────────────────────────────
+    // Main chat loop.
     loop {
         term.draw(|f| ui::draw(f, &app))?;
 
-        // Drain any network events into UI state.
         while let Ok(ev) = evt_rx.try_recv() {
             match ev {
                 AppEvent::Message(m) => app.messages.push(m),
@@ -167,18 +192,14 @@ async fn main() -> anyhow::Result<()> {
             }
         }
 
-        // Poll keyboard with a short timeout so the loop keeps spinning
-        // (this lets us drain network events promptly).
         if ct_event::poll(std::time::Duration::from_millis(50))? {
             if let Event::Key(k) = ct_event::read()? {
                 match k.code {
-                    // Send message
                     KeyCode::Enter if !app.input.is_empty() => {
                         let text = std::mem::take(&mut app.input);
                         let _ = cmd_tx.send(Command::SendText(text));
                     }
 
-                    // Ctrl+K: start call / hang up
                     KeyCode::Char('k') if k.modifiers.contains(KeyModifiers::CONTROL) => {
                         if app.in_call {
                             let _ = cmd_tx.send(Command::HangUp);
@@ -189,26 +210,21 @@ async fn main() -> anyhow::Result<()> {
                         }
                     }
 
-                    // Ctrl+M: toggle mute
                     KeyCode::Char('m') if k.modifiers.contains(KeyModifiers::CONTROL) => {
                         app.muted = !app.muted;
                         muted_flag.store(app.muted, Ordering::Relaxed);
                     }
 
-                    // Tab: cycle selected peer
                     KeyCode::Tab => {
                         app.select_next_peer();
                     }
 
-                    // Type a character
                     KeyCode::Char(c) => app.input.push(c),
 
-                    // Backspace
                     KeyCode::Backspace => {
                         app.input.pop();
                     }
 
-                    // Esc: quit
                     KeyCode::Esc => {
                         let _ = cmd_tx.send(Command::Quit);
                         break;
@@ -220,7 +236,6 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // ── Restore the terminal ──────────────────────────────────────────
     disable_raw_mode()?;
     execute!(term.backend_mut(), LeaveAlternateScreen)?;
     Ok(())

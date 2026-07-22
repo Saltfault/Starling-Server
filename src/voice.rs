@@ -1,4 +1,4 @@
-//! Microphone capture: reads from the default input device, encodes 20 ms
+//! Microphone capture: reads from the selected input device, encodes 20 ms
 //! frames with Opus, and sends the compressed bytes over an mpsc channel.
 //!
 //! The capture stream runs on the audio thread. Mute state is shared via an
@@ -11,38 +11,49 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc;
 
-/// Sample rate: 48 kHz (Opus standard for VoIP).
 const SAMPLE_RATE: u32 = 48_000;
-
-/// Frame size: 960 samples = 20 ms at 48 kHz.
 const FRAME: usize = 960;
 
 /// Start microphone capture.
 ///
-/// Returns a [`cpal::Stream`] that **must be kept alive** for the duration of
-/// the call — dropping it stops the mic.
+/// * `net_tx` — receives encoded Opus frames.
+/// * `muted` — checked on every frame. When `true`, frames are discarded.
+/// * `device_name` — preferred input device. `None` = system default.
 ///
-/// * `net_tx` — receives encoded Opus frames (one `Vec<u8>` per 20 ms frame).
-/// * `muted` — checked on every frame. When `true`, audio is still read from
-///   the device (to keep the stream healthy) but frames are discarded instead
-///   of being encoded and sent.
-///
-/// ALSA error spam is suppressed on Unix so that fallback failures don't
-/// corrupt the terminal UI.
+/// Returns a [`cpal::Stream`] that must be kept alive for the call duration.
 pub fn start_capture(
     net_tx: mpsc::UnboundedSender<Vec<u8>>,
     muted: Arc<AtomicBool>,
+    device_name: Option<&str>,
 ) -> anyhow::Result<cpal::Stream> {
-    crate::util::suppress_stderr(|| start_capture_inner(net_tx, muted))
+    crate::util::suppress_stderr(|| start_capture_inner(net_tx, muted, device_name))
 }
 
 fn start_capture_inner(
     net_tx: mpsc::UnboundedSender<Vec<u8>>,
     muted: Arc<AtomicBool>,
+    device_name: Option<&str>,
 ) -> anyhow::Result<cpal::Stream> {
-    let device = cpal::default_host()
-        .default_input_device()
-        .ok_or_else(|| anyhow::anyhow!("no microphone input device found"))?;
+    let host = cpal::default_host();
+
+    // Try to find the named device, fall back to system default.
+    let device = if let Some(name) = device_name {
+        let mut found = None;
+        if let Ok(devices) = host.input_devices() {
+            for d in devices {
+                let dname = d.to_string();
+                if dname == name {
+                    found = Some(d);
+                    break;
+                }
+            }
+        }
+        found
+    } else {
+        None
+    }
+    .or_else(|| host.default_input_device())
+    .ok_or_else(|| anyhow::anyhow!("no microphone input device found"))?;
 
     let cfg = cpal::StreamConfig {
         channels: 1,
@@ -51,25 +62,18 @@ fn start_capture_inner(
     };
 
     let mut enc = Encoder::new(SAMPLE_RATE, Channels::Mono, Application::Voip)?;
-
-    // Accumulator for incoming samples until we have a full Opus frame.
     let mut acc: Vec<f32> = Vec::with_capacity(FRAME);
 
     let stream = device.build_input_stream(
         cfg,
         move |data: &[f32], _: &_| {
             acc.extend_from_slice(data);
-
-            // Encode and send as many complete frames as we have accumulated.
             while acc.len() >= FRAME {
                 let frame: Vec<f32> = acc.drain(..FRAME).collect();
-
-                // If muted, skip encoding — just discard the frame.
                 if muted.load(Ordering::Relaxed) {
                     continue;
                 }
-
-                let mut out = vec![0u8; 400]; // 400 bytes is generous for Opus
+                let mut out = vec![0u8; 400];
                 if let Ok(n) = enc.encode_float(&frame, &mut out) {
                     out.truncate(n);
                     let _ = net_tx.send(out);
