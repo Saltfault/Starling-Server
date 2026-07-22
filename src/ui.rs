@@ -39,7 +39,7 @@ pub struct App {
     pub peers: Vec<EndpointId>,
     /// Index into `peers` for the currently selected peer (for calling).
     pub selected_peer: usize,
-    /// Room code shown in the header (e.g. "BIRD324524").
+    /// Room code shown in the header (e.g. "BIRD00CCFF").
     pub invite: Option<String>,
     /// Whether we are currently in a call.
     pub in_call: bool,
@@ -142,6 +142,20 @@ fn draw_name_entry(f: &mut Frame, app: &App) {
 
 // ── Chat UI ─────────────────────────────────────────────────────────────
 
+/// Parse the 6 hex digits out of a room code like "BIRD00CCFF" and return
+/// the corresponding RGB color. Returns `None` if the code isn't valid.
+fn room_code_color(code: &str) -> Option<Color> {
+    // Expected format: BIRD + 6 hex digits (e.g. BIRD00CCFF)
+    let hex = code.strip_prefix("BIRD")?;
+    if hex.len() != 6 {
+        return None;
+    }
+    let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+    Some(Color::Rgb(r, g, b))
+}
+
 /// Render the full chat UI: header, messages + birds panel, status, input.
 fn draw_chat(f: &mut Frame, app: &App) {
     let chunks = Layout::vertical([
@@ -152,12 +166,24 @@ fn draw_chat(f: &mut Frame, app: &App) {
     ])
     .split(f.area());
 
-    // ── Header: room code ──────────────────────────────────────────────
+    // ── Header: color swatch + room code ───────────────────────────────
     let invite = app.invite.as_deref().unwrap_or("waiting for endpoint...");
-    f.render_widget(
-        Paragraph::new(format!(" flock: {} ", invite)).style(Style::new().fg(Color::DarkGray)),
-        chunks[0],
-    );
+
+    let mut header_spans: Vec<Span> = Vec::new();
+
+    // Two half-blocks colored with the room code's RGB value, shown to the
+    // left of the code text. Only rendered when the code is a valid hex code.
+    if let Some(color) = room_code_color(invite) {
+        header_spans.push(Span::styled("▀▀", Style::new().fg(color)));
+        header_spans.push(Span::raw(" "));
+    }
+
+    header_spans.push(Span::styled(
+        format!(" flock: {} ", invite),
+        Style::new().fg(Color::DarkGray),
+    ));
+
+    f.render_widget(Line::from(header_spans), chunks[0]);
 
     // ── Messages + Birds panel (horizontal split) ──────────────────────
     let middle = Layout::horizontal([
