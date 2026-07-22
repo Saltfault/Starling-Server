@@ -174,7 +174,7 @@ fn draw_chat(f: &mut Frame, app: &App) {
     // Two half-blocks colored with the room code's RGB value, shown to the
     // left of the code text. Only rendered when the code is a valid hex code.
     if let Some(color) = room_code_color(invite) {
-        header_spans.push(Span::styled("▀▀", Style::new().fg(color)));
+        header_spans.push(Span::styled("▀▄", Style::new().fg(color)));
         header_spans.push(Span::raw(" "));
     }
 
