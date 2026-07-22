@@ -129,11 +129,18 @@ pub async fn run(
                 evt_tx: evt_tx.clone(),
             },
         )
+        .accept(
+            crate::call::VIDEO_ALPN,
+            VideoProto {
+                evt_tx: evt_tx.clone(),
+            },
+        )
         .spawn();
 
     let (sender, mut receiver) = gossip.subscribe(topic, bootstrap).await?.split();
 
     let mut _mic_stream: Option<cpal::Stream> = None;
+    let mut _cam_thread: Option<std::thread::JoinHandle<()>> = None;
 
     loop {
         tokio::select! {
@@ -161,6 +168,16 @@ pub async fn run(
                 }
 
                 Command::HangUp => { _mic_stream = None; }
+
+                Command::StartVideo(addr) => {
+                    let (cam_tx, cam_rx) = mpsc::unbounded_channel();
+                    _cam_thread = Some(crate::video::start_camera(cam_tx)?);
+                    let ep = endpoint.clone();
+                    tokio::spawn(async move {
+                        let _ = crate::call::place_video(ep, addr, cam_rx).await;
+                    });
+                }
+                Command::StopVideo => { _cam_thread = None; }
 
                 Command::Quit => break,
             },
@@ -219,6 +236,19 @@ struct VoiceProto {
 impl iroh::protocol::ProtocolHandler for VoiceProto {
     async fn accept(&self, conn: Connection) -> Result<(), iroh::protocol::AcceptError> {
         let _ = crate::call::handle_incoming(conn, self.evt_tx.clone()).await;
+        Ok(())
+    }
+}
+
+/// Protocol handler for incoming video call connections.
+#[derive(Debug)]
+struct VideoProto {
+    evt_tx: mpsc::UnboundedSender<AppEvent>,
+}
+
+impl iroh::protocol::ProtocolHandler for VideoProto {
+    async fn accept(&self, conn: Connection) -> Result<(), iroh::protocol::AcceptError> {
+        let _ = crate::call::recv_video(conn, self.evt_tx.clone()).await;
         Ok(())
     }
 }

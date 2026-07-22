@@ -12,6 +12,8 @@ pub enum Command {
     StartCall(EndpointAddr),
     /// End the current call.
     HangUp,
+    StartVideo(EndpointAddr),
+    StopVideo,
     /// Shut down the network layer.
     Quit,
 }
@@ -31,6 +33,7 @@ pub enum AppEvent {
     Ticket(String),
     /// A 20 ms Opus voice frame arrived.
     VoiceFrame(Vec<u8>),
+    VideoFrame(Vec<u8>),
 }
 
 /// A chat message that travels over the gossip layer.

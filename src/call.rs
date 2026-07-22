@@ -1,48 +1,74 @@
-//! Voice call layer: opens a direct QUIC connection to a peer and streams
-//! Opus frames as QUIC datagrams.
+//! Voice and video call layer: opens direct QUIC connections to peers and
+//! streams Opus audio (datagrams) or JPEG video (unidirectional streams).
 //!
-//! Outgoing calls use [`place_call`]; incoming calls are handled by
-//! [`handle_incoming`], which is invoked by `VoiceProto` in [`crate::net`].
+//! Outgoing calls use [`place_call`]/[`place_video`]; incoming calls are
+//! handled by [`handle_incoming`]/[`recv_video`], invoked by the protocol
+//! handlers in [`crate::net`].
 
 use crate::event::AppEvent;
 use iroh::{Endpoint, EndpointAddr, endpoint::Connection};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 
-/// ALPN string for the voice protocol. Both sides must agree on this.
+/// ALPN string for the voice protocol.
 pub const VOICE_ALPN: &[u8] = b"starling/voice/0";
 
-/// Place an outgoing call: connect to `peer` and stream mic frames as QUIC
-/// datagrams until the mic channel is closed (i.e. the caller hangs up).
-///
-/// This is spawned as a background task by [`crate::net::run`].
+/// ALPN string for the video protocol.
+pub const VIDEO_ALPN: &[u8] = b"starling/video/0";
+
+/// Place an outgoing voice call: connect to `peer` and stream mic frames as
+/// QUIC datagrams until the mic channel closes (hang-up).
 pub async fn place_call(
     endpoint: Endpoint,
     peer: EndpointAddr,
     mut frame_rx: mpsc::UnboundedReceiver<Vec<u8>>,
 ) -> anyhow::Result<()> {
     let conn = endpoint.connect(peer, VOICE_ALPN).await?;
-
-    // Each 20 ms Opus frame is sent as a single QUIC datagram.
-    // The loop ends when `frame_rx` is closed (mic stream dropped on hang-up).
     while let Some(frame) = frame_rx.recv().await {
         let _ = conn.send_datagram(frame.into());
     }
-
     Ok(())
 }
 
-/// Handle an incoming call: read datagrams from the connection and forward
-/// them to the UI as [`AppEvent::VoiceFrame`].
-///
-/// Called by `VoiceProto::accept` in [`crate::net`].
+/// Handle an incoming voice call: forward datagrams to the UI.
 pub async fn handle_incoming(
     conn: Connection,
     evt_tx: mpsc::UnboundedSender<AppEvent>,
 ) -> anyhow::Result<()> {
-    // Loop until the remote peer hangs up (connection closes).
     while let Ok(bytes) = conn.read_datagram().await {
         let _ = evt_tx.send(AppEvent::VoiceFrame(bytes.to_vec()));
     }
-
     Ok(())
+}
+
+/// Place an outgoing video call: connect to `peer` and stream JPEG frames
+/// over a unidirectional QUIC stream. Each frame is prefixed with a u32
+/// length (big-endian).
+pub async fn place_video(
+    endpoint: Endpoint,
+    peer: EndpointAddr,
+    mut frame_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+) -> anyhow::Result<()> {
+    let conn = endpoint.connect(peer, VIDEO_ALPN).await?;
+    let mut tx = conn.open_uni().await?;
+    while let Some(jpeg) = frame_rx.recv().await {
+        tx.write_u32(jpeg.len() as u32).await?;
+        tx.write_all(&jpeg).await?;
+    }
+    Ok(())
+}
+
+/// Handle an incoming video call: read JPEG frames from a unidirectional
+/// QUIC stream and forward them to the UI.
+pub async fn recv_video(
+    conn: Connection,
+    evt_tx: mpsc::UnboundedSender<AppEvent>,
+) -> anyhow::Result<()> {
+    let mut rx = conn.accept_uni().await?;
+    loop {
+        let len = rx.read_u32().await? as usize;
+        let mut buf = vec![0u8; len];
+        rx.read_exact(&mut buf).await?;
+        let _ = evt_tx.send(AppEvent::VideoFrame(buf));
+    }
 }

@@ -1,6 +1,7 @@
 //! UI state and rendering.
 
 use crate::event::ChatMessage;
+use image::RgbImage;
 use iroh::{EndpointAddr, EndpointId};
 use ratatui::{
     prelude::*,
@@ -32,6 +33,10 @@ pub struct App {
     pub muted: bool,
     /// Maps peer EndpointId → display name (from profile announcements).
     pub peer_names: HashMap<EndpointId, String>,
+    /// Latest decoded video frame (JPEG → RgbImage).
+    pub video_frame: Option<RgbImage>,
+    /// Whether the video pane is currently shown.
+    pub show_video: bool,
 }
 
 impl App {
@@ -107,13 +112,35 @@ pub fn draw(f: &mut Frame, app: &App) {
         })
         .collect();
 
+    // When video is showing, split the message area into messages (60%)
+    // and video (40%). Otherwise the messages take the full width.
+    let msg_area = if app.show_video {
+        let panes = Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)])
+            .split(middle[0]);
+        if let Some(img) = &app.video_frame {
+            let inner = panes[1].inner(Margin {
+                vertical: 1,
+                horizontal: 1,
+            });
+            let lines = crate::video::frame_to_lines(img, inner.width, inner.height);
+            f.render_widget(
+                Block::default().borders(Borders::ALL).title(" video "),
+                panes[1],
+            );
+            f.render_widget(Paragraph::new(lines), inner);
+        }
+        panes[0]
+    } else {
+        middle[0]
+    };
+
     f.render_widget(
         List::new(items).block(
             Block::default()
                 .borders(Borders::ALL)
                 .title(format!(" #global . {} birds ", app.bird_count())),
         ),
-        middle[0],
+        msg_area,
     );
 
     // Birds panel — local user first, then remote peers with names.

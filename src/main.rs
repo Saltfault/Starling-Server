@@ -11,6 +11,7 @@ mod playback;
 mod setup;
 mod ui;
 mod util;
+mod video;
 mod voice;
 
 use crossterm::{
@@ -148,6 +149,11 @@ async fn main() -> anyhow::Result<()> {
                         p.push_opus(&bytes);
                     }
                 }
+                AppEvent::VideoFrame(jpeg) => {
+                    if let Ok(img) = image::load_from_memory(&jpeg) {
+                        app.video_frame = Some(img.to_rgb8());
+                    }
+                }
             }
         }
 
@@ -199,6 +205,18 @@ async fn main() -> anyhow::Result<()> {
                     KeyCode::Char('m') if k.modifiers.contains(KeyModifiers::CONTROL) => {
                         app.muted = !app.muted;
                         muted_flag.store(app.muted, Ordering::Relaxed);
+                    }
+
+                    KeyCode::Char('v') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                        app.show_video = !app.show_video;
+                        match (app.show_video, app.selected_peer_addr()) {
+                            (true, Some(addr)) => {
+                                let _ = cmd_tx.send(Command::StartVideo(addr));
+                            }
+                            _ => {
+                                let _ = cmd_tx.send(Command::StopVideo);
+                            }
+                        }
                     }
 
                     KeyCode::Tab => {
