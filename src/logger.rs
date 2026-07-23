@@ -78,6 +78,11 @@ fn log(level: &str, msg: &str) {
     }
 }
 
+/// Log an informational message with a timestamp.
+pub fn info(msg: &str) {
+    log("INFO:  ", msg);
+}
+
 /// Log an error message with a timestamp.
 pub fn error(msg: &str) {
     log("ERROR: ", msg);

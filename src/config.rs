@@ -34,6 +34,11 @@ impl Profile {
         }
     }
 
+    /// Return the directory where roost data directories live.
+    pub fn roosts_dir() -> PathBuf {
+        Self::config_dir().join("roosts")
+    }
+
     /// Path to the profile file on disk.
     fn config_path() -> PathBuf {
         Self::config_dir().join("profile.bin")
