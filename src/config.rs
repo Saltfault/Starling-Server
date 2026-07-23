@@ -24,7 +24,7 @@ pub struct Profile {
 
 impl Profile {
     /// Return the config directory for the current platform.
-    fn config_dir() -> PathBuf {
+    pub fn config_dir() -> PathBuf {
         if let Ok(home) = std::env::var("HOME") {
             PathBuf::from(home).join(".config").join("starling")
         } else if let Ok(appdata) = std::env::var("APPDATA") {
