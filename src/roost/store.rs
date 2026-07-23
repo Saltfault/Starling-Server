@@ -7,7 +7,7 @@
 //! Timestamps are zero-padded to 20 digits so lexicographic ordering
 //! matches chronological ordering.
 
-use crate::event::ChatMessage;
+use starling::event::ChatMessage;
 
 /// A sled‑backed message store.
 ///

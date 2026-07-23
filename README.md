@@ -1,11 +1,8 @@
 # Starling Server
 
-The **roost** server and shared protocol library for **[Starling](https://forgejo.hearthhome.lol/Saltfault/Starling)** — a federated, peer-to-peer communications platform.
+The **roost** server binary for **[Starling](https://forgejo.hearthhome.lol/Saltfault/Starling)** — a federated, peer-to-peer communications platform.
 
-This crate is two things at once:
-
-1. **A roost server** (`starling-server` binary) — a persistent bird that stays online, stores a community's chat history to disk, and serves it to birds who join later. Your own community server, run on your own machine, over the peer-to-peer murmuration instead of a company's cloud.
-2. **A shared protocol library** (`starling_server` lib) — the networking, crypto, and voice/video pipelines that every Starling client embeds. The TUI, and the planned Desktop/Android/Web clients, all build on this.
+The shared protocol library (networking, crypto, types) was extracted to the [`starling`](https://forgejo.hearthhome.lol/Saltfault/Starling) crate, which both this server and the TUI depend on.
 
 > ⚠️ **Early access — under active development.** Roost lifecycle (create/open/destroy) and history persistence work today. Membership and channel management are landing with roles (see the roadmap). Expect rough edges and breaking changes; bug reports and feedback are welcome.
 
@@ -75,44 +72,6 @@ All roost commands take the roost's `<name>`.
 **Backups are your responsibility.** A roost's history and identity live only under its data directory — copy `~/.config/starling/roosts/<name>/` to back it up. There is no company keeping a copy behind the scenes; that's the point.
 
 ---
-
-# For developers — using the library
-
-Every Starling client embeds this crate for protocol handling, so a client repo contains only UI code.
-
-```toml
-[dependencies]
-starling-server = { git = "https://forgejo.hearthhome.lol/Saltfault/Starling-Server.git" }
-```
-
-## Modules
-
-| Module | Purpose |
-|--------|---------|
-| `net` | iroh endpoint, gossip subscription, voice/video protocol handlers |
-| `roost` | Headless server mode — durable message store, history sync |
-| `call` | Opens/accepts QUIC streams for voice datagrams and video |
-| `voice` | Mic capture: cpal input → Opus encoder → channel |
-| `playback` | Audio output: channel → Opus decoder → ring buffer → cpal output |
-| `video` | Webcam capture (nokhwa) → JPEG frames → channel, plus terminal rendering |
-| `opus_ffi` | Safe Rust wrappers around the pre-built Opus C library |
-| `crypto` | E2E encryption (ChaCha20-Poly1305) for gossip messages |
-| `event` | Shared types: `Command`, `AppEvent`, `ChatMessage`, `GossipPayload` |
-| `config` | Profile persistence, identity key, 32-digit code |
-| `sync` | History backfill for late-joining peers |
-| `logger` | File logger with gzipped log rotation |
-| `util` | Platform utilities (stderr suppression on Unix) |
-
-The UI-facing contract is the `Command` (UI → network) and `AppEvent` (network → UI) enums in `event`. A client spawns `net::run`, feeds it `Command`s, and renders `AppEvent`s — the same shape the TUI uses.
-
-## Clients on this library
-
-| Client | Repo | Status |
-|--------|------|--------|
-| Starling TUI | [Starling-TUI](https://forgejo.hearthhome.lol/Saltfault/Starling-TUI) | 🚧 Active — text, voice, video |
-| Starling Desktop | [Starling-Desktop](https://forgejo.hearthhome.lol/Saltfault/Starling-Desktop) | 📋 Planned |
-| Starling Android | [Starling-Android](https://forgejo.hearthhome.lol/Saltfault/Starling-Android) | 📋 Planned |
-| Starling Web | [Starling-Web](https://forgejo.hearthhome.lol/Saltfault/Starling-Web) | 📋 Planned |
 
 ---
 
