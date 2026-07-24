@@ -8,16 +8,11 @@ use serde::{Deserialize, Serialize};
 use starling::config::Profile;
 use starling::crypto::FlockCrypto;
 use starling::event::GossipPayload;
-use starling::net::{room_code_from_node_id, topic_for};
+use starling::net::{encode_roost_code, topic_for};
+use starling::roost::RoostState;
 use std::path::PathBuf;
 use std::sync::Arc;
 use store::Store;
-
-#[derive(Clone, Serialize, Deserialize)]
-pub struct RoostState {
-    pub name: String,
-    pub channels: Vec<String>,
-}
 
 fn validate_roost_name(name: &str) -> anyhow::Result<()> {
     let valid = !name.is_empty()
@@ -73,7 +68,7 @@ fn load_invite_code(name: &str) -> anyhow::Result<String> {
         .map_err(|_| anyhow::anyhow!("invalid identity key file (expected exactly 32 bytes)"))?;
     let secret = iroh::SecretKey::from_bytes(&arr);
     let node_id: iroh::EndpointId = secret.public();
-    Ok(room_code_from_node_id(&node_id))
+    Ok(encode_roost_code(&node_id))
 }
 
 pub fn create(name: &str) -> anyhow::Result<()> {
@@ -103,7 +98,7 @@ fn create_contents(name: &str, dir: &std::path::Path) -> anyhow::Result<()> {
     write_secret_key(&roost_key_path(name), &key.to_bytes())?;
 
     let node_id: iroh::EndpointId = key.public();
-    let code = room_code_from_node_id(&node_id);
+    let code = encode_roost_code(&node_id);
     println!("✓ roost '{name}' created");
     println!("  invite code: {code}");
     println!("  data: {}", dir.display());
@@ -159,7 +154,7 @@ pub async fn open(name: &str) -> anyhow::Result<()> {
     endpoint.online().await;
 
     let my_id = endpoint.addr().id;
-    let code = room_code_from_node_id(&my_id);
+    let code = encode_roost_code(&my_id);
     println!("✓ roost '{name}' is online");
     println!("  code: {code}");
     println!("  join: starling join {code}");
