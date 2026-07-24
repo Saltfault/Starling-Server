@@ -1,14 +1,14 @@
 pub mod store;
 
-use starling::config::Profile;
-use starling::crypto::FlockCrypto;
-use starling::event::GossipPayload;
-use starling::net::{room_code_from_node_id, topic_for};
 use iroh::{Endpoint, endpoint::presets, protocol::Router};
 use iroh_gossip::api::Event;
 use iroh_gossip::net::{GOSSIP_ALPN, Gossip};
 use n0_future::StreamExt;
 use serde::{Deserialize, Serialize};
+use starling::config::Profile;
+use starling::crypto::FlockCrypto;
+use starling::event::GossipPayload;
+use starling::net::{room_code_from_node_id, topic_for};
 use std::path::PathBuf;
 use std::sync::Arc;
 use store::Store;
@@ -17,6 +17,18 @@ use store::Store;
 pub struct RoostState {
     pub name: String,
     pub channels: Vec<String>,
+}
+
+fn validate_roost_name(name: &str) -> anyhow::Result<()> {
+    let valid = !name.is_empty()
+        && name.len() <= 64
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'));
+    if !valid {
+        anyhow::bail!("invalid roost name: use 1-64 ASCII letters, numbers, '-' or '_'");
+    }
+    Ok(())
 }
 
 fn roost_data_dir(name: &str) -> PathBuf {
@@ -31,7 +43,24 @@ fn roost_key_path(name: &str) -> PathBuf {
     roost_data_dir(name).join("identity.key")
 }
 
+fn write_secret_key(path: &std::path::Path, bytes: &[u8; 32]) -> anyhow::Result<()> {
+    use std::io::Write;
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    Ok(())
+}
+
 fn load_invite_code(name: &str) -> anyhow::Result<String> {
+    validate_roost_name(name)?;
     let key_path = roost_key_path(name);
     let bytes = std::fs::read(&key_path).map_err(|e| {
         anyhow::anyhow!(
@@ -39,31 +68,41 @@ fn load_invite_code(name: &str) -> anyhow::Result<String> {
             key_path.display()
         )
     })?;
-    let arr: [u8; 32] = bytes[..32]
+    let arr: [u8; 32] = bytes
         .try_into()
-        .map_err(|_| anyhow::anyhow!("invalid identity key file (expected 32 bytes)"))?;
+        .map_err(|_| anyhow::anyhow!("invalid identity key file (expected exactly 32 bytes)"))?;
     let secret = iroh::SecretKey::from_bytes(&arr);
-    let node_id: iroh::EndpointId = secret.public().into();
+    let node_id: iroh::EndpointId = secret.public();
     Ok(room_code_from_node_id(&node_id))
 }
 
 pub fn create(name: &str) -> anyhow::Result<()> {
+    validate_roost_name(name)?;
     let dir = roost_data_dir(name);
     if dir.exists() {
         anyhow::bail!("roost '{name}' already exists at {}", dir.display());
     }
 
     std::fs::create_dir_all(&dir)?;
-    let _db = sled::open(&roost_db_path(name))?;
+    let result = create_contents(name, &dir);
+    if result.is_err() {
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    result
+}
+
+fn create_contents(name: &str, dir: &std::path::Path) -> anyhow::Result<()> {
+    let db = sled::open(roost_db_path(name))?;
     starling::logger::info(&format!(
         "created roost database at {}",
         roost_db_path(name).display()
     ));
 
+    drop(db);
     let key = iroh::SecretKey::generate();
-    std::fs::write(&roost_key_path(name), key.to_bytes())?;
+    write_secret_key(&roost_key_path(name), &key.to_bytes())?;
 
-    let node_id: iroh::EndpointId = key.public().into();
+    let node_id: iroh::EndpointId = key.public();
     let code = room_code_from_node_id(&node_id);
     println!("✓ roost '{name}' created");
     println!("  invite code: {code}");
@@ -76,6 +115,7 @@ pub fn create(name: &str) -> anyhow::Result<()> {
 }
 
 pub async fn open(name: &str) -> anyhow::Result<()> {
+    validate_roost_name(name)?;
     let dir = roost_data_dir(name);
     if !dir.exists() {
         anyhow::bail!(
@@ -86,26 +126,27 @@ pub async fn open(name: &str) -> anyhow::Result<()> {
 
     starling::logger::info(&format!("opening roost '{name}' from {}", dir.display()));
 
-    let store = Arc::new(Store::open(&roost_db_path(name).to_string_lossy())?);
+    let store = Arc::new(Store::open(roost_db_path(name))?);
 
     let state = RoostState {
         name: name.to_string(),
         channels: vec!["general".into()],
     };
 
-    let secret = match std::fs::read(&roost_key_path(name)) {
-        Ok(bytes) if bytes.len() == 32 => {
-            let arr: [u8; 32] = bytes.try_into().expect("checked len");
-            iroh::SecretKey::from_bytes(&arr)
-        }
-        _ => {
-            let key = iroh::SecretKey::generate();
-            if let Err(e) = std::fs::write(&roost_key_path(name), key.to_bytes()) {
-                starling::logger::error(&format!("failed to write roost identity key: {e}"));
-            }
-            key
-        }
-    };
+    let key_path = roost_key_path(name);
+    let bytes = std::fs::read(&key_path).map_err(|e| {
+        anyhow::anyhow!(
+            "failed to read roost identity at {}: {e}; run `roost doctor` and restore the key from backup",
+            key_path.display()
+        )
+    })?;
+    let key_bytes: [u8; 32] = bytes.try_into().map_err(|_| {
+        anyhow::anyhow!(
+            "invalid roost identity at {} (expected exactly 32 bytes); refusing to change the roost identity",
+            key_path.display()
+        )
+    })?;
+    let secret = iroh::SecretKey::from_bytes(&key_bytes);
 
     let endpoint = Endpoint::builder(presets::N0)
         .secret_key(secret)
@@ -128,7 +169,7 @@ pub async fn open(name: &str) -> anyhow::Result<()> {
     let _router = Router::builder(endpoint.clone())
         .accept(GOSSIP_ALPN, gossip.clone())
         .accept(
-            RoostSync::ALPN,
+            ROOST_SYNC_ALPN,
             RoostSync {
                 store: store.clone(),
             },
@@ -167,8 +208,9 @@ pub async fn open(name: &str) -> anyhow::Result<()> {
         });
     }
 
-    let control = topic_for(&format!("starling/roost/{code}/_control"));
-    let ctl_crypto = FlockCrypto::from_room_code(&format!("{code}/_control"));
+    let control_key = format!("{code}/_control");
+    let control = topic_for(&format!("starling/roost/{control_key}"));
+    let ctl_crypto = FlockCrypto::from_room_code(&control_key);
     let (ctl_tx, mut ctl_rx) = gossip.subscribe(control, vec![]).await?.split();
 
     loop {
@@ -198,6 +240,7 @@ pub async fn open(name: &str) -> anyhow::Result<()> {
 }
 
 pub fn destroy(name: &str) -> anyhow::Result<()> {
+    validate_roost_name(name)?;
     let dir = roost_data_dir(name);
     if !dir.exists() {
         anyhow::bail!("roost '{name}' not found at {}", dir.display());
@@ -209,6 +252,7 @@ pub fn destroy(name: &str) -> anyhow::Result<()> {
 }
 
 pub fn invite(name: &str) -> anyhow::Result<()> {
+    validate_roost_name(name)?;
     let dir = roost_data_dir(name);
     if !dir.exists() {
         anyhow::bail!("roost '{name}' not found at {}", dir.display());
@@ -222,6 +266,7 @@ pub fn invite(name: &str) -> anyhow::Result<()> {
 }
 
 pub fn status(name: &str) -> anyhow::Result<()> {
+    validate_roost_name(name)?;
     let dir = roost_data_dir(name);
     if !dir.exists() {
         anyhow::bail!("roost '{name}' not found at {}", dir.display());
@@ -238,6 +283,7 @@ pub fn status(name: &str) -> anyhow::Result<()> {
 }
 
 pub fn doctor(name: &str) -> anyhow::Result<()> {
+    validate_roost_name(name)?;
     let dir = roost_data_dir(name);
     if !dir.exists() {
         anyhow::bail!("roost '{name}' not found at {}", dir.display());
@@ -288,6 +334,7 @@ pub fn doctor(name: &str) -> anyhow::Result<()> {
 }
 
 pub fn logs(name: &str) -> anyhow::Result<()> {
+    validate_roost_name(name)?;
     let dir = roost_data_dir(name);
     if !dir.exists() {
         anyhow::bail!("roost '{name}' not found at {}", dir.display());
@@ -297,13 +344,20 @@ pub fn logs(name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// ALPN used by clients to request persisted channel history.
+pub const ROOST_SYNC_ALPN: &[u8] = b"starling/roost-sync/0";
+
+/// Wire request for roost history. Responses are postcard-encoded
+/// `Vec<starling::event::ChatMessage>` values capped at 500 messages.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RoostSyncRequest {
+    pub channel: String,
+    pub since: i64,
+}
+
 #[derive(Debug, Clone)]
 struct RoostSync {
     store: Arc<Store>,
-}
-
-impl RoostSync {
-    const ALPN: &[u8] = b"starling/roost-sync/0";
 }
 
 impl iroh::protocol::ProtocolHandler for RoostSync {
@@ -320,12 +374,18 @@ impl iroh::protocol::ProtocolHandler for RoostSync {
             starling::logger::warn("roost-sync: failed to read request");
             return Ok(());
         };
-        let Ok((chan, since)): Result<(String, i64), _> = postcard::from_bytes(&req) else {
+        let Ok(request): Result<RoostSyncRequest, _> = postcard::from_bytes(&req) else {
             starling::logger::warn("roost-sync: invalid request format");
             return Ok(());
         };
 
-        let history = self.store.since(&chan, since);
+        let history = match self.store.since(&request.channel, request.since) {
+            Ok(history) => history,
+            Err(e) => {
+                starling::logger::warn(&format!("roost-sync: invalid request: {e}"));
+                return Ok(());
+            }
+        };
         match postcard::to_stdvec(&history) {
             Ok(bytes) => {
                 if let Err(e) = send.write_all(&bytes).await {
@@ -340,5 +400,23 @@ impl iroh::protocol::ProtocolHandler for RoostSync {
 
         conn.closed().await;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_roost_name;
+
+    #[test]
+    fn validates_roost_names_before_building_paths() {
+        for valid in ["starling", "my-roost_2", "A"] {
+            assert!(validate_roost_name(valid).is_ok());
+        }
+        for invalid in ["", ".", "..", "../outside", "a/b", "a\\b", "with space"] {
+            assert!(
+                validate_roost_name(invalid).is_err(),
+                "accepted {invalid:?}"
+            );
+        }
     }
 }

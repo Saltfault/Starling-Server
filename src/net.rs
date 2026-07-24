@@ -1,5 +1,3 @@
-use starling::crypto::FlockCrypto;
-use starling::event::{BirdStatus, ChatMessage, GossipPayload};
 use crate::event::{AppEvent, Command};
 use iroh::{
     Endpoint, EndpointId,
@@ -11,6 +9,8 @@ use iroh_gossip::{
     net::{GOSSIP_ALPN, Gossip},
 };
 use n0_future::StreamExt;
+use starling::crypto::FlockCrypto;
+use starling::event::{BirdStatus, ChatMessage, GossipPayload};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use tokio::sync::mpsc;

@@ -63,10 +63,9 @@ pub fn start_camera(
                 if DynamicImage::ImageRgb8(img)
                     .write_to(&mut jpeg, ImageFormat::Jpeg)
                     .is_ok()
+                    && tx.send(jpeg.into_inner()).is_err()
                 {
-                    if tx.send(jpeg.into_inner()).is_err() {
-                        break;
-                    }
+                    break;
                 }
             }
         }

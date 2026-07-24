@@ -16,6 +16,8 @@ pub const VOICE_ALPN: &[u8] = b"starling/voice/0";
 /// ALPN string for the video protocol.
 pub const VIDEO_ALPN: &[u8] = b"starling/video/0";
 
+const MAX_VIDEO_FRAME_BYTES: usize = 10 * 1024 * 1024;
+
 /// Place an outgoing voice call: connect to `peer` and stream mic frames as
 /// QUIC datagrams until the mic channel closes (hang-up).
 pub async fn place_call(
@@ -52,9 +54,14 @@ pub async fn place_video(
     let conn = endpoint.connect(peer, VIDEO_ALPN).await?;
     let mut tx = conn.open_uni().await?;
     while let Some(jpeg) = frame_rx.recv().await {
-        tx.write_u32(jpeg.len() as u32).await?;
+        if jpeg.len() > MAX_VIDEO_FRAME_BYTES {
+            anyhow::bail!("video frame exceeds {MAX_VIDEO_FRAME_BYTES} byte limit");
+        }
+        let len = u32::try_from(jpeg.len())?;
+        tx.write_u32(len).await?;
         tx.write_all(&jpeg).await?;
     }
+    tx.finish()?;
     Ok(())
 }
 
@@ -67,6 +74,9 @@ pub async fn recv_video(
     let mut rx = conn.accept_uni().await?;
     loop {
         let len = rx.read_u32().await? as usize;
+        if len > MAX_VIDEO_FRAME_BYTES {
+            anyhow::bail!("peer sent oversized video frame ({len} bytes)");
+        }
         let mut buf = vec![0u8; len];
         rx.read_exact(&mut buf).await?;
         let _ = evt_tx.send(AppEvent::VideoFrame(buf));
