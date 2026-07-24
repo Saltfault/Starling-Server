@@ -81,6 +81,7 @@ jobs:
             libv4l-dev:arm64 \
             libv4l-dev:armhf \
             libv4l-dev:i386
+          update-alternatives --set ld /usr/bin/x86_64-linux-gnu-ld 2>/dev/null || true
 
       - name: Build all targets
         run: |
