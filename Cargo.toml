@@ -1,6 +1,6 @@
 [package]
 name = "Starling-Server"
-version = "0.2.12"
+version = "0.2.13"
 edition = "2024"
 license = "Apache-2.0"
 description = "Headless roost server for Starling — persistent chat history and message relay"

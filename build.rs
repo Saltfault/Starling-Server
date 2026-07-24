@@ -23,13 +23,21 @@ fn main() {
         return;
     }
 
+    let target_os = env::var("CARGO_CFG_TARGET_OS").expect("target OS not set by Cargo");
+    let target_arch = env::var("CARGO_CFG_TARGET_ARCH").expect("target arch not set by Cargo");
+
+    // shiguredo does not publish an Intel macOS archive. Use the native Opus
+    // installed by Homebrew (or another system package manager) instead.
+    if target_os == "macos" && target_arch == "x86_64" {
+        write_system_bindings(&bindings_path);
+        println!("cargo:rustc-link-lib=opus");
+        return;
+    }
+
     if lib_dir.exists() && bindings_path.exists() {
         link_opus(&lib_dir);
         return;
     }
-
-    let target_os = env::var("CARGO_CFG_TARGET_OS").expect("target OS not set by Cargo");
-    let target_arch = env::var("CARGO_CFG_TARGET_ARCH").expect("target arch not set by Cargo");
     let asset_target = match (target_os.as_str(), target_arch.as_str()) {
         ("windows", "x86_64") => "windows_x86_64",
         ("linux", "x86_64") => "ubuntu-24.04_x86_64",
@@ -102,6 +110,54 @@ fn main() {
         .expect("failed to copy Opus bindings from archive");
 
     link_opus(&lib_dir);
+}
+
+fn write_system_bindings(path: &Path) {
+    const BINDINGS: &str = r#"
+pub const OPUS_APPLICATION_VOIP: u32 = 2048;
+
+#[repr(C)]
+pub struct OpusEncoder {
+    _private: [u8; 0],
+}
+
+#[repr(C)]
+pub struct OpusDecoder {
+    _private: [u8; 0],
+}
+
+unsafe extern "C" {
+    pub fn opus_encoder_create(
+        fs: ::std::os::raw::c_int,
+        channels: ::std::os::raw::c_int,
+        application: ::std::os::raw::c_int,
+        error: *mut ::std::os::raw::c_int,
+    ) -> *mut OpusEncoder;
+    pub fn opus_encode_float(
+        st: *mut OpusEncoder,
+        pcm: *const f32,
+        frame_size: ::std::os::raw::c_int,
+        data: *mut u8,
+        max_data_bytes: ::std::os::raw::c_int,
+    ) -> ::std::os::raw::c_int;
+    pub fn opus_encoder_destroy(st: *mut OpusEncoder);
+    pub fn opus_decoder_create(
+        fs: ::std::os::raw::c_int,
+        channels: ::std::os::raw::c_int,
+        error: *mut ::std::os::raw::c_int,
+    ) -> *mut OpusDecoder;
+    pub fn opus_decode_float(
+        st: *mut OpusDecoder,
+        data: *const u8,
+        len: ::std::os::raw::c_int,
+        pcm: *mut f32,
+        frame_size: ::std::os::raw::c_int,
+        decode_fec: ::std::os::raw::c_int,
+    ) -> ::std::os::raw::c_int;
+    pub fn opus_decoder_destroy(st: *mut OpusDecoder);
+}
+"#;
+    fs::write(path, BINDINGS).expect("failed to write system Opus bindings");
 }
 
 fn validate_archive(archive_path: &Path) {
