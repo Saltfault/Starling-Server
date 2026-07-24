@@ -1,9 +1,17 @@
+#[cfg(feature = "media")]
 pub mod call;
+#[cfg(feature = "media")]
 pub mod event;
+#[cfg(feature = "media")]
 pub mod net;
+#[cfg(feature = "media")]
 pub mod opus_ffi;
+#[cfg(feature = "media")]
 pub mod playback;
 pub mod roost;
+#[cfg(feature = "media")]
 pub mod sync;
+#[cfg(feature = "media")]
 pub mod video;
+#[cfg(feature = "media")]
 pub mod voice;

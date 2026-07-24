@@ -8,6 +8,11 @@ use std::process::Command;
 const OPUS_VERSION: &str = "2026.1.0";
 
 fn main() {
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_MEDIA");
+    if env::var_os("CARGO_FEATURE_MEDIA").is_none() {
+        return;
+    }
+
     println!("cargo:rerun-if-env-changed=LIBOPUS_LIB_DIR");
     println!("cargo:rerun-if-env-changed=LIBOPUS_BINDINGS_PATH");
 
