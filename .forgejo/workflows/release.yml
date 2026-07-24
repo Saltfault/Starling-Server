@@ -38,6 +38,8 @@ jobs:
             exit 0
           fi
           echo "skip=false" >> "$GITHUB_OUTPUT"
+      - name: Install system dependencies
+        run: apt-get update && apt-get install -y libasound2-dev
       - name: Run tests
         if: steps.check.outputs.skip == 'false'
         run: cargo test --all-features
@@ -71,6 +73,10 @@ jobs:
             lld \
             musl-tools \
             libclang-dev \
+            libasound2-dev \
+            libasound2-dev:arm64 \
+            libasound2-dev:armhf \
+            libasound2-dev:i386 \
             libv4l-dev:amd64 \
             libv4l-dev:arm64 \
             libv4l-dev:armhf \
