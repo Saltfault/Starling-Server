@@ -1,6 +1,6 @@
 [package]
 name = "Starling-Server"
-version = "0.2.8"
+version = "0.2.9"
 edition = "2024"
 license = "Apache-2.0"
 description = "Headless roost server for Starling — persistent chat history and message relay"
@@ -26,6 +26,6 @@ ratatui = "0.30.2"
 ringbuf = "0.5.1"
 serde = { version = "1.0.229", features = ["derive"] }
 sled = "0.34"
-starling = { path = "../starling" }
+starling = { git = "https://github.com/Saltfault/starling.git" }
 tokio = { version = "1.53.1", features = ["full"] }
 uuid = { version = "1.24.0", features = ["v4", "serde"] }
