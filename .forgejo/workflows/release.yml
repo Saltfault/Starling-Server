@@ -104,7 +104,7 @@ jobs:
               target_upper=$(echo "$target" | tr '[:lower:]-' '[:upper:]_')
               export "CARGO_TARGET_${target_upper}_LINKER=$linker"
             fi
-            cargo build --release --target "$target"
+            cargo build --release --target "$target" --no-default-features
             ext=""
             [[ "$target" == *-windows-* ]] && ext=".exe"
             cp "target/$target/release/starling-server$ext" "starling-server-$target$ext"
