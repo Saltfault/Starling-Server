@@ -30,7 +30,17 @@ fn main() {
     // installed by Homebrew (or another system package manager) instead.
     if target_os == "macos" && target_arch == "x86_64" {
         write_system_bindings(&bindings_path);
-        println!("cargo:rustc-link-lib=opus");
+        let opus_prefix = Command::new("brew")
+            .args(["--prefix", "opus"])
+            .output()
+            .expect("Homebrew is required to locate Opus on Intel macOS");
+        if !opus_prefix.status.success() {
+            panic!("Homebrew Opus is not installed; run `brew install opus`");
+        }
+        let prefix =
+            String::from_utf8(opus_prefix.stdout).expect("Homebrew returned a non-UTF-8 Opus path");
+        let lib_dir = PathBuf::from(prefix.trim()).join("lib");
+        link_opus(&lib_dir);
         return;
     }
 
