@@ -1,5 +1,9 @@
+pub mod history_proto;
+pub mod history_store;
 pub mod store;
 
+use history_proto::HistoryProto;
+use history_store::HistoryStore;
 use iroh::{Endpoint, endpoint::presets, protocol::Router};
 use iroh_gossip::api::Event;
 use iroh_gossip::net::{GOSSIP_ALPN, Gossip};
@@ -8,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use starling::config::Profile;
 use starling::crypto::FlockCrypto;
 use starling::event::GossipPayload;
+use starling::history::HISTORY_V1_ALPN;
 use starling::net::{encode_roost_code, topic_for};
 use starling::roost::RoostState;
 use std::path::PathBuf;
@@ -99,12 +104,15 @@ fn create_contents(name: &str, dir: &std::path::Path) -> anyhow::Result<()> {
 
     let node_id: iroh::EndpointId = key.public();
     let code = encode_roost_code(&node_id);
-    println!("✓ roost '{name}' created");
+    println!("' roost '{name}' created");
     println!("  invite code: {code}");
     println!("  data: {}", dir.display());
     println!();
     println!("Start it with: starling-server roost open {name}");
-    starling::logger::info(&format!("roost '{name}' created with code {code}"));
+    starling::logger::info(&format!(
+        "roost '{name}' created, invite fingerprint {}",
+        starling::logger::fingerprint(code.as_bytes())
+    ));
 
     Ok(())
 }
@@ -122,6 +130,7 @@ pub async fn open(name: &str) -> anyhow::Result<()> {
     starling::logger::info(&format!("opening roost '{name}' from {}", dir.display()));
 
     let store = Arc::new(Store::open(roost_db_path(name))?);
+    let history_store = Arc::new(HistoryStore::new(store.db())?);
 
     let state = RoostState {
         name: name.to_string(),
@@ -158,11 +167,19 @@ pub async fn open(name: &str) -> anyhow::Result<()> {
     println!("✓ roost '{name}' is online");
     println!("  code: {code}");
     println!("  join: starling join {code}");
-    starling::logger::info(&format!("roost '{name}' online with code {code}"));
+    starling::logger::info(&format!(
+        "roost '{name}' online, invite fingerprint {}",
+        starling::logger::fingerprint(code.as_bytes())
+    ));
 
     let gossip = Gossip::builder().spawn(endpoint.clone());
+    // MembershipState V1 is not yet produced by this V0 roost runtime. Keep
+    // History V1 registered for interoperability, but deny every request until
+    // the authority path injects a membership state and supplies authorization.
+    let history = HistoryProto::new(history_store, |_remote, _request, _membership| false);
     let _router = Router::builder(endpoint.clone())
         .accept(GOSSIP_ALPN, gossip.clone())
+        .accept(HISTORY_V1_ALPN, history)
         .accept(
             ROOST_SYNC_ALPN,
             RoostSync {
@@ -335,7 +352,8 @@ pub fn logs(name: &str) -> anyhow::Result<()> {
         anyhow::bail!("roost '{name}' not found at {}", dir.display());
     }
     println!("roost '{name}' logs:");
-    println!("  Logs are written to logs/latest.log in the working directory");
+    let log_path = starling::config::Profile::config_dir().join("logs/latest.log");
+    println!("  {}", log_path.display());
     Ok(())
 }
 

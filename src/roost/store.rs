@@ -20,6 +20,10 @@ impl Store {
         })
     }
 
+    pub(crate) fn db(&self) -> sled::Db {
+        self.db.clone()
+    }
+
     /// Persist a message without allowing equal timestamps to overwrite each other.
     pub fn append(&self, channel: &str, message: &ChatMessage) -> anyhow::Result<()> {
         validate_channel(channel)?;

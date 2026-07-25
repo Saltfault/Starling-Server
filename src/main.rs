@@ -1,6 +1,8 @@
 //! Starling Server — binary entrypoint.
 
 fn main() -> anyhow::Result<()> {
+    starling::logger::init()?;
+    starling::logger::info("Starling server starting");
     let args: Vec<String> = std::env::args().collect();
 
     let Some(cmd) = args.get(1).map(String::as_str) else {
