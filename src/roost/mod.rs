@@ -180,7 +180,11 @@ fn update_history_membership(
     Ok(())
 }
 
-pub async fn open(name: &str) -> anyhow::Result<()> {
+pub async fn open(
+    name: &str,
+    silent: bool,
+    mut console_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+) -> anyhow::Result<()> {
     validate_roost_name(name)?;
     let dir = roost_data_dir(name);
     if !dir.exists() {
@@ -442,13 +446,107 @@ pub async fn open(name: &str) -> anyhow::Result<()> {
         ),
     };
 
+    if !silent {
+        println!(
+            "Roost '{}' is running. Type 'help' for commands, 'quit' to stop.",
+            name
+        );
+        println!("  invite code: {}", code);
+    }
+
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
+                if !silent {
+                    println!("Shutting down...");
+                }
                 starling::logger::info(&format!("roost '{name}': shutting down on signal"));
                 store.db().flush()?;
                 history_store.flush()?;
                 return Ok(());
+            }
+            cmd = console_rx.recv() => {
+                if let Some(line) = cmd {
+                    if line.is_empty() {
+                        continue;
+                    }
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    match parts.first().copied() {
+                            Some("help") | Some("h") | Some("?") => {
+                                println!("Available commands:");
+                                println!("  status       — show roost info");
+                                println!("  members      — list members");
+                                println!("  invite       — show invite code");
+                                println!("  logs         — show log file path");
+                                println!("  quit | exit  — shut down the roost");
+                                println!("  help         — show this help");
+                            }
+                            Some("status") | Some("s") => {
+                                let st = state.lock().unwrap_or_else(|p| p.into_inner());
+                                println!("Roost: {name}");
+                                println!("  invite code: {code}");
+                                println!("  channels: {}", st.channels.join(", "));
+                                println!("  members: {}", st.perms.members.len());
+                                println!("  directory: {}", dir.display());
+                                drop(st);
+                                let db_size = store
+                                    .db()
+                                    .size_on_disk()
+                                    .map(|s| format!("{} bytes", s))
+                                    .unwrap_or_else(|_| "unknown".into());
+                                println!("  db size: {db_size}");
+                            }
+                            Some("members") | Some("m") => {
+                                let st = state.lock().unwrap_or_else(|p| p.into_inner());
+                                if let Some(owner) = &st.perms.owner {
+                                    println!("  owner: {}", starling::logger::fingerprint(owner.as_bytes()));
+                                }
+                                for member in st.perms.members.keys() {
+                                    println!(
+                                        "  member: {}",
+                                        starling::logger::fingerprint(member.as_bytes())
+                                    );
+                                }
+                                if !st.perms.bans.is_empty() {
+                                    println!("  bans ({}):", st.perms.bans.len());
+                                    for ban in &st.perms.bans {
+                                        println!(
+                                            "    - {}",
+                                            starling::logger::fingerprint(ban.as_bytes())
+                                        );
+                                    }
+                                }
+                                if !st.perms.invited.is_empty() {
+                                    println!("  pending invites: {}", st.perms.invited.len());
+                                }
+                            }
+                            Some("invite") | Some("i") => {
+                                println!("{code}");
+                            }
+                            Some("logs") | Some("l") => {
+                                if let Some(log_path) = starling::logger::path() {
+                                    println!("{}", log_path.display());
+                                } else {
+                                    println!("Log file not available");
+                                }
+                            }
+                            Some("quit") | Some("exit") | Some("q") => {
+                                if !silent {
+                                    println!("Shutting down...");
+                                }
+                                starling::logger::info(&format!(
+                                    "roost '{name}': shutting down on console command"
+                                ));
+                                store.db().flush()?;
+                                history_store.flush()?;
+                                return Ok(());
+                            }
+                            _ => {
+                                println!("Unknown command: {line}");
+                                println!("Type 'help' for available commands.");
+                            }
+                    }
+                }
             }
             event = ctl_rx.next() => {
                 match event {
