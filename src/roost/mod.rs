@@ -20,6 +20,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use store::Store;
+use tokio::sync::mpsc;
 
 use fs2::FileExt;
 
@@ -45,6 +46,10 @@ fn roost_db_path(name: &str) -> PathBuf {
 
 fn roost_key_path(name: &str) -> PathBuf {
     roost_data_dir(name).join("identity.key")
+}
+
+fn roost_lock_path(name: &str) -> PathBuf {
+    roost_data_dir(name).join("lock.pid")
 }
 
 fn write_secret_key(path: &std::path::Path, bytes: &[u8; 32]) -> anyhow::Result<()> {
@@ -136,7 +141,7 @@ pub async fn open(name: &str) -> anyhow::Result<()> {
     // Acquire an exclusive lock file to prevent a second process from
     // opening the same sled database concurrently (platform-dependent
     // corruption risk with multiple writers).
-    let lock_path = roost_data_dir(name).join("lock.pid");
+    let lock_path = roost_lock_path(name);
     let lock = std::fs::File::create(&lock_path).map_err(|e| {
         anyhow::anyhow!(
             "roost '{name}': cannot create lock file at {}: {e}",
@@ -220,9 +225,10 @@ pub async fn open(name: &str) -> anyhow::Result<()> {
     // MembershipState V1 is not yet produced by this V0 roost runtime. Keep
     // History V1 registered for interoperability, but deny every request until
     // the authority path injects a membership state and supplies authorization.
-    let history = HistoryProto::new(history_store.clone(), |_remote, _request, _membership| {
-        false
+    let history = HistoryProto::new(history_store.clone(), |remote, _request, membership| {
+        membership.authorized_at(&remote, membership.revision(), membership.key_epoch())
     });
+    let (state_tx, mut state_rx) = mpsc::channel::<RoostState>(32);
     let _router = Router::builder(endpoint.clone())
         .accept(GOSSIP_ALPN, gossip.clone())
         .accept(HISTORY_V1_ALPN, history)
@@ -238,6 +244,7 @@ pub async fn open(name: &str) -> anyhow::Result<()> {
             ModProto {
                 state: state.clone(),
                 store: store.clone(),
+                state_tx: state_tx,
             },
         )
         .accept(
@@ -371,15 +378,97 @@ pub async fn open(name: &str) -> anyhow::Result<()> {
                     }
                 }
             }
+            snapshot = state_rx.recv() => {
+                if let Some(snapshot) = snapshot {
+                    match postcard::to_stdvec(&snapshot) {
+                        Ok(blob) => {
+                            let encrypted = ctl_crypto.encrypt(&blob);
+                            if let Err(e) = ctl_tx.broadcast(encrypted.into()).await {
+                                starling::logger::warn(&format!(
+                                    "roost: failed to broadcast state on control channel: {e}"
+                                ));
+                            }
+                        }
+                        Err(e) => {
+                            starling::logger::error(&format!(
+                                "roost: failed to serialise roost state: {e}"
+                            ));
+                        }
+                    }
+                }
+            }
         }
     }
 }
 
-pub fn destroy(name: &str) -> anyhow::Result<()> {
+/// Request graceful shutdown of a running roost by reading its PID from the
+/// lock file written by [`open`] and sending a termination signal.
+pub fn request_shutdown(name: &str) -> anyhow::Result<()> {
     validate_roost_name(name)?;
     let dir = roost_data_dir(name);
     if !dir.exists() {
         anyhow::bail!("roost '{name}' not found at {}", dir.display());
+    }
+
+    let lock_path = roost_lock_path(name);
+    let pid_str = std::fs::read_to_string(&lock_path).map_err(|e| {
+        anyhow::anyhow!(
+            "roost '{name}' does not appear to be running (no lock file at {}: {e})",
+            lock_path.display()
+        )
+    })?;
+    let pid: u32 = pid_str
+        .trim()
+        .parse()
+        .map_err(|e| anyhow::anyhow!("invalid PID in lock file for roost '{name}': {e}"))?;
+
+    send_shutdown_signal(pid)
+        .map_err(|e| anyhow::anyhow!("could not signal roost '{name}' (PID {pid}): {e}"))?;
+
+    println!("✓ requested shutdown of roost '{name}'");
+    starling::logger::info(&format!("roost '{name}': shutdown requested (PID {pid})"));
+    Ok(())
+}
+
+#[cfg(unix)]
+fn send_shutdown_signal(pid: u32) -> anyhow::Result<()> {
+    // SIGINT triggers the graceful shutdown path in open()'s
+    // tokio::signal::ctrl_c() handler, flushing the database.
+    let status = std::process::Command::new("kill")
+        .arg("-INT")
+        .arg(pid.to_string())
+        .status()
+        .map_err(|e| anyhow::anyhow!("failed to run kill: {e}"))?;
+    if !status.success() {
+        anyhow::bail!("kill returned exit code {}", status);
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn send_shutdown_signal(pid: u32) -> anyhow::Result<()> {
+    let status = std::process::Command::new("taskkill")
+        .arg("/PID")
+        .arg(pid.to_string())
+        .status()
+        .map_err(|e| anyhow::anyhow!("failed to run taskkill: {e}"))?;
+    if !status.success() {
+        anyhow::bail!("taskkill returned exit code {}", status);
+    }
+    Ok(())
+}
+
+pub fn destroy(name: &str, force: bool) -> anyhow::Result<()> {
+    validate_roost_name(name)?;
+    let dir = roost_data_dir(name);
+    if !dir.exists() {
+        anyhow::bail!("roost '{name}' not found at {}", dir.display());
+    }
+    if !force {
+        anyhow::bail!("refusing to delete roost '{name}': re-run with --force");
+    }
+    if roost_lock_path(name).exists() {
+        anyhow::bail!("roost '{name}' is running; stop it first");
     }
     std::fs::remove_dir_all(&dir)?;
     println!("✓ roost '{name}' destroyed");
@@ -570,6 +659,7 @@ pub const MOD_ALPN: &[u8] = b"starling/mod/0";
 struct ModProto {
     state: Arc<Mutex<RoostState>>,
     store: Arc<Store>,
+    state_tx: mpsc::Sender<RoostState>,
 }
 
 impl iroh::protocol::ProtocolHandler for ModProto {
@@ -637,15 +727,11 @@ impl iroh::protocol::ProtocolHandler for ModProto {
             }
         };
         if dirty {
-            let snapshot = self
-                .state
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .perms
-                .clone();
-            if let Err(e) = self.store.save_perms(&snapshot) {
+            let snapshot = self.state.lock().unwrap().clone();
+            if let Err(e) = self.store.save_perms(&snapshot.perms) {
                 starling::logger::warn(&format!("roost: failed to persist perms: {e}"));
             }
+            let _ = self.state_tx.send(snapshot);
         }
 
         let verdict = verdict;
