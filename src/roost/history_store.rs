@@ -81,6 +81,12 @@ impl HistoryStore {
         Ok(())
     }
 
+    /// Flush all buffered writes to disk so no data is lost on shutdown.
+    pub fn flush(&self) -> anyhow::Result<()> {
+        self.db.flush().context("flush history store")?;
+        Ok(())
+    }
+
     fn membership_if_present(&self, space: &SpaceId) -> anyhow::Result<Option<MembershipState>> {
         Ok(self
             .memberships

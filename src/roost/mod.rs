@@ -16,9 +16,12 @@ use starling::history::HISTORY_V1_ALPN;
 use starling::net::{encode_roost_code, receive_payload, topic_for};
 use starling::roost::perms::Perm;
 use starling::roost::{ModRequest, RoostState, RoostWelcome};
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use store::Store;
+
+use fs2::FileExt;
 
 fn validate_roost_name(name: &str) -> anyhow::Result<()> {
     let valid = !name.is_empty()
@@ -130,16 +133,35 @@ pub async fn open(name: &str) -> anyhow::Result<()> {
 
     starling::logger::info(&format!("opening roost '{name}' from {}", dir.display()));
 
+    // Acquire an exclusive lock file to prevent a second process from
+    // opening the same sled database concurrently (platform-dependent
+    // corruption risk with multiple writers).
+    let lock_path = roost_data_dir(name).join("lock.pid");
+    let mut lock = std::fs::File::create(&lock_path).map_err(|e| {
+        anyhow::anyhow!(
+            "roost '{name}': cannot create lock file at {}: {e}",
+            lock_path.display()
+        )
+    })?;
+    lock.try_lock_exclusive()
+        .map_err(|_| anyhow::anyhow!("roost '{name}' already running"))?;
+    writeln!(&lock, "{}", std::process::id())?;
+    // Lock is released on drop when this function returns (graceful shutdown
+    // or error), so a subsequent start will succeed.
+
     let store = Arc::new(Store::open(roost_db_path(name))?);
     let history_store = Arc::new(HistoryStore::new(store.db())?);
 
     // The owner is the roost's own node id, known only after the endpoint binds.
     // `perms.owner` is filled in below once `my_id` is available. Any persisted
     // roles/members/invitations/bans are loaded so the door survives a restart.
-    let persisted_perms = store.load_perms().unwrap_or_else(|e| {
-        starling::logger::warn(&format!("roost: failed to load persisted perms: {e}"));
-        None
-    });
+    let persisted_perms = match store.load_perms() {
+        Ok(perms) => perms, // Some(state) or None (fresh roost)
+        Err(e) => anyhow::bail!(
+            "roost '{name}': perms are corrupt ({e}); refusing to start with an empty \
+             member/ban list — restore roost.db from backup"
+        ),
+    };
     let state = RoostState {
         name: name.to_string(),
         channels: vec!["general".into()],
@@ -196,7 +218,9 @@ pub async fn open(name: &str) -> anyhow::Result<()> {
     // MembershipState V1 is not yet produced by this V0 roost runtime. Keep
     // History V1 registered for interoperability, but deny every request until
     // the authority path injects a membership state and supplies authorization.
-    let history = HistoryProto::new(history_store, |_remote, _request, _membership| false);
+    let history = HistoryProto::new(history_store.clone(), |_remote, _request, _membership| {
+        false
+    });
     let _router = Router::builder(endpoint.clone())
         .accept(GOSSIP_ALPN, gossip.clone())
         .accept(HISTORY_V1_ALPN, history)
@@ -303,6 +327,12 @@ pub async fn open(name: &str) -> anyhow::Result<()> {
 
     loop {
         tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                starling::logger::info(&format!("roost '{name}': shutting down on signal"));
+                store.db().flush()?;
+                history_store.flush()?;
+                return Ok(());
+            }
             event = ctl_rx.next() => {
                 match event {
                     Some(Ok(Event::NeighborUp(_))) => {
