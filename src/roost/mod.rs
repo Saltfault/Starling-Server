@@ -202,7 +202,9 @@ pub async fn open(name: &str) -> anyhow::Result<()> {
 
     let my_id = endpoint.addr().id;
     {
-        let mut st = state.lock().unwrap();
+        let mut st = state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         st.perms.owner = Some(my_id);
     }
     let code = encode_roost_code(&my_id);
@@ -250,7 +252,11 @@ pub async fn open(name: &str) -> anyhow::Result<()> {
     // The channel list is captured once at startup; live channel add/remove is
     // a follow-on. Secrets are minted and persisted by the store, never derived
     // from the public code, so non-members can't decrypt channel gossip.
-    let startup_channels = state.lock().unwrap().channels.clone();
+    let startup_channels = state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .channels
+        .clone();
     for chan in &startup_channels {
         let topic = topic_for(&format!("starling/roost/{code}/{chan}"));
         let secret = match store.channel_secret(chan) {
@@ -336,7 +342,7 @@ pub async fn open(name: &str) -> anyhow::Result<()> {
             event = ctl_rx.next() => {
                 match event {
                     Some(Ok(Event::NeighborUp(_))) => {
-                        let snapshot = state.lock().unwrap().clone();
+                        let snapshot = state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
                         match postcard::to_stdvec(&snapshot) {
                             Ok(blob) => {
                                 let encrypted = ctl_crypto.encrypt(&blob);
@@ -501,7 +507,13 @@ impl iroh::protocol::ProtocolHandler for RoostSync {
         // The door check: only members may pull history. The caller's identity is
         // authenticated by the transport, so it cannot be spoofed by a client.
         let who = conn.remote_id();
-        if !self.state.lock().unwrap().perms.is_active_member(&who) {
+        if !self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .perms
+            .is_active_member(&who)
+        {
             starling::logger::warn(&format!("roost-sync: refused non-member {who}"));
             return Ok(());
         }
@@ -566,7 +578,13 @@ impl iroh::protocol::ProtocolHandler for ModProto {
         conn: iroh::endpoint::Connection,
     ) -> Result<(), iroh::protocol::AcceptError> {
         let from = conn.remote_id();
-        if !self.state.lock().unwrap().perms.is_active_member(&from) {
+        if !self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .perms
+            .is_active_member(&from)
+        {
             return Ok(());
         }
         let Ok((mut send, mut recv)) = conn.accept_bi().await else {
@@ -584,7 +602,10 @@ impl iroh::protocol::ProtocolHandler for ModProto {
         // successful mutation we snapshot perms and persist them so the roost's
         // member list, invitations, and bans survive a restart.
         let (verdict, dirty): (Result<(), String>, bool) = {
-            let mut st = self.state.lock().unwrap();
+            let mut st = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             match req {
                 ModRequest::Ban(target) => {
                     let r = st.perms.handle_ban(&from, &target);
@@ -616,7 +637,12 @@ impl iroh::protocol::ProtocolHandler for ModProto {
             }
         };
         if dirty {
-            let snapshot = self.state.lock().unwrap().perms.clone();
+            let snapshot = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .perms
+                .clone();
             if let Err(e) = self.store.save_perms(&snapshot) {
                 starling::logger::warn(&format!("roost: failed to persist perms: {e}"));
             }
@@ -662,7 +688,10 @@ impl iroh::protocol::ProtocolHandler for JoinProto {
         // channel secret. All three are high-entropy random values minted by
         // the store; none are derivable from the public roost code.
         let verdict: Result<RoostWelcome, String> = {
-            let mut st = self.state.lock().unwrap();
+            let mut st = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             match st.perms.handle_join(&who) {
                 Ok(()) => {
                     // Persist the updated membership so it survives a restart.
