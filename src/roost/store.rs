@@ -142,9 +142,8 @@ impl Store {
 
         let mut messages = Vec::new();
         let prefix = channel_prefix(channel);
-        let mut scanned_new = 0usize;
-        for item in self.db.scan_prefix(prefix) {
-            if scanned_new >= MAX_SCAN_MESSAGES {
+        for (i, item) in self.db.scan_prefix(prefix).enumerate() {
+            if i >= MAX_SCAN_MESSAGES {
                 break;
             }
             let (_, value) = item?;
@@ -152,13 +151,11 @@ impl Store {
             if message.ts > since {
                 messages.push(message);
             }
-            scanned_new += 1;
         }
 
         let legacy_prefix = format!("{channel}/");
-        let mut scanned_legacy = 0usize;
-        for item in self.db.scan_prefix(legacy_prefix.as_bytes()) {
-            if scanned_legacy >= MAX_SCAN_MESSAGES {
+        for (i, item) in self.db.scan_prefix(legacy_prefix.as_bytes()).enumerate() {
+            if i >= MAX_SCAN_MESSAGES {
                 break;
             }
             let (_, value) = item?;
@@ -166,7 +163,6 @@ impl Store {
             if message.ts > since {
                 messages.push(message);
             }
-            scanned_legacy += 1;
         }
 
         messages.sort_by(|a, b| a.ts.cmp(&b.ts).then_with(|| a.id.cmp(&b.id)));

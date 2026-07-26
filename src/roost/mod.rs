@@ -325,7 +325,7 @@ pub async fn open(name: &str) -> anyhow::Result<()> {
             ModProto {
                 state: state.clone(),
                 store: store.clone(),
-                state_tx: state_tx,
+                state_tx,
             },
         )
         .accept(
@@ -384,16 +384,15 @@ pub async fn open(name: &str) -> anyhow::Result<()> {
                 // (older peers); we persist those the legacy way to keep a V0
                 // roost that broadcasts during migration readable.
                 match receive_payload(&crypto, &msg.content) {
-                    Ok(Some(envelope)) => match envelope.payload {
-                        GossipPayload::Chat(m) => {
-                            if let Err(e) = st.append(&ch, &m) {
-                                starling::logger::error(&format!(
-                                    "roost: failed to persist message in '{ch}': {e}"
-                                ));
-                            }
+                    Ok(Some(envelope)) => {
+                        if let GossipPayload::Chat(m) = envelope.payload
+                            && let Err(e) = st.append(&ch, &m)
+                        {
+                            starling::logger::error(&format!(
+                                "roost: failed to persist message in '{ch}': {e}"
+                            ));
                         }
-                        _ => {}
-                    },
+                    }
                     Ok(None) => {
                         if let Some(plain) = crypto.decrypt(&msg.content)
                             && let Ok(GossipPayload::Chat(m)) =
@@ -559,15 +558,12 @@ pub async fn open(name: &str) -> anyhow::Result<()> {
                             let handle = tokio::spawn(async move {
                                 while let Some(Ok(Event::Received(msg))) = rx.next().await {
                                     match receive_payload(&crypto, &msg.content) {
-                                        Ok(Some(envelope)) => match envelope.payload {
-                                            GossipPayload::Chat(m) => {
-                                                if let Err(e) = st.append(&ch, &m) {
-                                                    starling::logger::error(&format!(
-                                                        "roost: failed to persist message in '{ch}': {e}"
-                                                    ));
-                                                }
-                                            }
-                                            _ => {}
+                                        Ok(Some(envelope)) => if let GossipPayload::Chat(m) = envelope.payload
+                                            && let Err(e) = st.append(&ch, &m)
+                                        {
+                                            starling::logger::error(&format!(
+                                                "roost: failed to persist message in '{ch}': {e}"
+                                            ));
                                         },
                                         Ok(None) => {
                                             if let Some(plain) = crypto.decrypt(&msg.content)
@@ -1266,10 +1262,8 @@ impl iroh::protocol::ProtocolHandler for ModProto {
             if let Err(e) = self.store.save_channels(&snapshot.channels) {
                 starling::logger::warn(&format!("roost: failed to persist channels: {e}"));
             }
-            let _ = self.state_tx.send(snapshot);
+            let _ = self.state_tx.send(snapshot).await;
         }
-
-        let verdict = verdict;
 
         let _ = tokio::time::timeout(
             IO_TIMEOUT,
