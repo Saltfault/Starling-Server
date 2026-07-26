@@ -13,12 +13,15 @@ use starling::config::Profile;
 use starling::crypto::FlockCrypto;
 use starling::event::GossipPayload;
 use starling::history::HISTORY_V1_ALPN;
+use starling::membership::{MembershipScopeId, MembershipState};
 use starling::net::{encode_roost_code, receive_payload, topic_for};
+use starling::protocol::{ChannelId, RoostId, SpaceId};
 use starling::roost::perms::Perm;
 use starling::roost::{ModRequest, RoostState, RoostWelcome};
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use store::Store;
 use tokio::sync::mpsc;
 
@@ -126,6 +129,47 @@ fn create_contents(name: &str, dir: &std::path::Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Derive a deterministic [`ChannelId`] from a channel name so the roost can
+/// construct [`SpaceId::RoostChannel`] for history membership lookups without
+/// storing a manifest.
+fn channel_id_from_name(name: &str) -> ChannelId {
+    let mut id = [0u8; 16];
+    let bytes = name.as_bytes();
+    let len = bytes.len().min(16);
+    id[..len].copy_from_slice(&bytes[..len]);
+    ChannelId(id)
+}
+
+/// Build a [`MembershipState`] from the current [`PermState`] and inject it
+/// into the history store so that History V1 requests can authorize callers
+/// against the roost's live permission model.
+fn update_history_membership(
+    history_store: &HistoryStore,
+    state: &RoostState,
+    roost_id: RoostId,
+) -> anyhow::Result<()> {
+    let owner = state
+        .perms
+        .owner
+        .ok_or_else(|| anyhow::anyhow!("roost owner not set"))?;
+    let scope = MembershipScopeId::Roost(roost_id);
+    let membership = MembershipState::from_flat(
+        scope,
+        owner,
+        state.perms.members.keys().copied(),
+        state.perms.key_epoch,
+    );
+    for channel in &state.channels {
+        let channel_id = channel_id_from_name(channel);
+        let space = SpaceId::RoostChannel {
+            roost: roost_id,
+            channel: channel_id,
+        };
+        history_store.set_membership(space, membership.clone())?;
+    }
+    Ok(())
+}
+
 pub async fn open(name: &str) -> anyhow::Result<()> {
     validate_roost_name(name)?;
     let dir = roost_data_dir(name);
@@ -219,6 +263,17 @@ pub async fn open(name: &str) -> anyhow::Result<()> {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         st.perms.owner = Some(my_id);
     }
+    let roost_id = RoostId(*my_id.as_bytes());
+    {
+        let st = state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Err(e) = update_history_membership(&history_store, &st, roost_id) {
+            starling::logger::warn(&format!(
+                "roost '{name}': failed to inject initial history membership: {e}"
+            ));
+        }
+    }
     let code = encode_roost_code(&my_id);
     println!("✓ roost '{name}' is online");
     println!("  code: {code}");
@@ -229,9 +284,6 @@ pub async fn open(name: &str) -> anyhow::Result<()> {
     ));
 
     let gossip = Gossip::builder().spawn(endpoint.clone());
-    // MembershipState V1 is not yet produced by this V0 roost runtime. Keep
-    // History V1 registered for interoperability, but deny every request until
-    // the authority path injects a membership state and supplies authorization.
     let history = HistoryProto::new(history_store.clone(), |remote, _request, membership| {
         membership.authorized_at(&remote, membership.revision(), membership.key_epoch())
     });
@@ -349,7 +401,12 @@ pub async fn open(name: &str) -> anyhow::Result<()> {
     // handshake alongside the per-channel secrets.
     let control_secret = store.control_secret()?;
     let ctl_crypto = FlockCrypto::from_secret(&control_secret);
-    let (ctl_tx, mut ctl_rx) = gossip.subscribe(control, vec![]).await?.split();
+    let (ctl_tx, mut ctl_rx) = match gossip.subscribe(control, vec![]).await {
+        Ok(sub) => sub.split(),
+        Err(e) => anyhow::bail!(
+            "roost '{name}': control channel unavailable (corrupt control secret?): {e}"
+        ),
+    };
 
     loop {
         tokio::select! {
@@ -393,6 +450,11 @@ pub async fn open(name: &str) -> anyhow::Result<()> {
             }
             snapshot = state_rx.recv() => {
                 if let Some(snapshot) = snapshot {
+                    if let Err(e) = update_history_membership(&history_store, &snapshot, roost_id) {
+                        starling::logger::warn(&format!(
+                            "roost: failed to update history membership after perm change: {e}"
+                        ));
+                    }
                     match postcard::to_stdvec(&snapshot) {
                         Ok(blob) => {
                             let encrypted = ctl_crypto.encrypt(&blob);
@@ -584,6 +646,8 @@ pub fn logs(name: &str) -> anyhow::Result<()> {
 }
 
 /// ALPN used by clients to request persisted channel history.
+const IO_TIMEOUT: Duration = Duration::from_secs(10);
+
 pub const ROOST_SYNC_ALPN: &[u8] = b"starling/roost-sync/0";
 const MAX_ROOST_SYNC_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 
@@ -619,13 +683,13 @@ impl iroh::protocol::ProtocolHandler for RoostSync {
             starling::logger::warn(&format!("roost-sync: refused non-member {who}"));
             return Ok(());
         }
-        let Ok((mut send, mut recv)) = conn.accept_bi().await else {
-            starling::logger::warn("roost-sync: failed to accept bi stream");
+        let Ok(Ok((mut send, mut recv))) = tokio::time::timeout(IO_TIMEOUT, conn.accept_bi()).await else {
+            starling::logger::warn("roost-sync: accept timed out");
             return Ok(());
         };
 
-        let Ok(req) = recv.read_to_end(256).await else {
-            starling::logger::warn("roost-sync: failed to read request");
+        let Ok(Ok(req)) = tokio::time::timeout(IO_TIMEOUT, recv.read_to_end(256)).await else {
+            starling::logger::warn("roost-sync: read timed out");
             return Ok(());
         };
         let Ok(request): Result<RoostSyncRequest, _> = postcard::from_bytes(&req) else {
@@ -649,8 +713,16 @@ impl iroh::protocol::ProtocolHandler for RoostSync {
                         bytes.len(),
                         MAX_ROOST_SYNC_RESPONSE_BYTES
                     ));
-                } else if let Err(e) = send.write_all(&bytes).await {
-                    starling::logger::warn(&format!("roost-sync: failed to send history: {e}"));
+                } else {
+                    match tokio::time::timeout(IO_TIMEOUT, send.write_all(&bytes)).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => {
+                            starling::logger::warn(&format!("roost-sync: failed to send history: {e}"));
+                        }
+                        Err(_) => {
+                            starling::logger::warn("roost-sync: send timed out");
+                        }
+                    }
                 }
                 let _ = send.finish();
             }
@@ -690,10 +762,10 @@ impl iroh::protocol::ProtocolHandler for ModProto {
         {
             return Ok(());
         }
-        let Ok((mut send, mut recv)) = conn.accept_bi().await else {
+        let Ok(Ok((mut send, mut recv))) = tokio::time::timeout(IO_TIMEOUT, conn.accept_bi()).await else {
             return Ok(());
         };
-        let Ok(bytes) = recv.read_to_end(1024).await else {
+        let Ok(Ok(bytes)) = tokio::time::timeout(IO_TIMEOUT, recv.read_to_end(1024)).await else {
             return Ok(());
         };
         let Ok(req) = postcard::from_bytes::<ModRequest>(&bytes) else {
@@ -749,9 +821,11 @@ impl iroh::protocol::ProtocolHandler for ModProto {
 
         let verdict = verdict;
 
-        let _ = send
-            .write_all(&postcard::to_stdvec(&verdict).unwrap_or_default())
-            .await;
+        let _ = tokio::time::timeout(
+            IO_TIMEOUT,
+            send.write_all(&postcard::to_stdvec(&verdict).unwrap_or_default()),
+        )
+        .await;
         let _ = send.finish();
         conn.closed().await;
         Ok(())
@@ -776,7 +850,7 @@ impl iroh::protocol::ProtocolHandler for JoinProto {
         conn: iroh::endpoint::Connection,
     ) -> Result<(), iroh::protocol::AcceptError> {
         let who = conn.remote_id();
-        let Ok(mut send) = conn.open_uni().await else {
+        let Ok(Ok(mut send)) = tokio::time::timeout(IO_TIMEOUT, conn.open_uni()).await else {
             return Ok(());
         };
 
@@ -823,7 +897,7 @@ impl iroh::protocol::ProtocolHandler for JoinProto {
 
         let encoded = postcard::to_stdvec(&verdict).unwrap_or_default();
         if encoded.len() <= MAX_JOIN_RESPONSE_BYTES {
-            let _ = send.write_all(&encoded).await;
+            let _ = tokio::time::timeout(IO_TIMEOUT, send.write_all(&encoded)).await;
         } else {
             starling::logger::warn(&format!(
                 "roost-join: welcome for {who} is {} bytes, exceeds limit",
