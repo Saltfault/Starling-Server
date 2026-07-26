@@ -283,7 +283,13 @@ pub async fn open(name: &str) -> anyhow::Result<()> {
             }
         };
         let crypto = FlockCrypto::from_secret(&secret);
-        let (_sender, mut rx) = gossip.subscribe(topic, vec![]).await?.split();
+        let (_sender, mut rx) = match gossip.subscribe(topic, vec![]).await {
+            Ok(sub) => sub.split(),
+            Err(e) => {
+                starling::logger::error(&format!("roost: subscribe failed for '{chan}': {e}"));
+                continue;
+            }
+        };
         let (st, ch) = (store.clone(), chan.clone());
 
         tokio::spawn(async move {
