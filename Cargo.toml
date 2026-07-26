@@ -1,6 +1,6 @@
 [package]
 name = "Starling-Server"
-version = "0.3.2"
+version = "0.3.3"
 edition = "2024"
 license = "Apache-2.0"
 description = "Headless roost server for Starling — persistent chat history and message relay"
@@ -24,6 +24,9 @@ serde = { version = "1.0.229", features = ["derive"] }
 sled = "0.34"
 starling = { git = "https://forgejo.hearthhome.lol/Saltfault/Starling.git" }
 tokio = { version = "1.53.1", features = ["full"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [patch."https://forgejo.hearthhome.lol/Saltfault/Starling.git"]
 starling = { path = "../starling" }
