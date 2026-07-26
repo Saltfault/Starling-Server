@@ -100,6 +100,7 @@ impl Store {
             let message: ChatMessage = postcard::from_bytes(&value)?;
             if message.id == id {
                 self.db.remove(key)?;
+                self.db.flush()?; // deletion must survive a crash
                 return Ok(true);
             }
         }
