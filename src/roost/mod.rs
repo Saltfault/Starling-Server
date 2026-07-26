@@ -4,7 +4,7 @@ pub mod store;
 
 use history_proto::HistoryProto;
 use history_store::HistoryStore;
-use iroh::{Endpoint, endpoint::presets, protocol::Router};
+use iroh::{Endpoint, RelayMode, RelayUrl, endpoint::presets, protocol::Router};
 use iroh_gossip::api::Event;
 use iroh_gossip::net::{GOSSIP_ALPN, Gossip};
 use n0_future::StreamExt;
@@ -13,10 +13,11 @@ use starling::config::Profile;
 use starling::crypto::FlockCrypto;
 use starling::event::GossipPayload;
 use starling::history::HISTORY_V1_ALPN;
-use starling::net::{encode_roost_code, topic_for};
-use starling::roost::RoostState;
+use starling::net::{encode_roost_code, receive_payload, topic_for};
+use starling::roost::perms::Perm;
+use starling::roost::{ModRequest, RoostState, RoostWelcome};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use store::Store;
 
 fn validate_roost_name(name: &str) -> anyhow::Result<()> {
@@ -132,10 +133,19 @@ pub async fn open(name: &str) -> anyhow::Result<()> {
     let store = Arc::new(Store::open(roost_db_path(name))?);
     let history_store = Arc::new(HistoryStore::new(store.db())?);
 
+    // The owner is the roost's own node id, known only after the endpoint binds.
+    // `perms.owner` is filled in below once `my_id` is available. Any persisted
+    // roles/members/invitations/bans are loaded so the door survives a restart.
+    let persisted_perms = store.load_perms().unwrap_or_else(|e| {
+        starling::logger::warn(&format!("roost: failed to load persisted perms: {e}"));
+        None
+    });
     let state = RoostState {
         name: name.to_string(),
         channels: vec!["general".into()],
+        perms: persisted_perms.unwrap_or_default(),
     };
+    let state = Arc::new(Mutex::new(state));
 
     let key_path = roost_key_path(name);
     let bytes = std::fs::read(&key_path).map_err(|e| {
@@ -152,17 +162,27 @@ pub async fn open(name: &str) -> anyhow::Result<()> {
     })?;
     let secret = iroh::SecretKey::from_bytes(&key_bytes);
 
-    let endpoint = Endpoint::builder(presets::N0)
-        .secret_key(secret)
-        .bind()
-        .await
-        .map_err(|e| {
-            starling::logger::error(&format!("endpoint bind failed for roost '{name}': {e}"));
-            e
-        })?;
+    let mut builder = Endpoint::builder(presets::N0).secret_key(secret);
+    // Allow a community to point its roost's endpoint at a self-hosted
+    // iroh-relay (run beside the roost) without rebuilding. Relays only
+    // forward ciphertext the E2E crypto has already sealed, so this drops
+    // the last centralized dependency in the roost flight path. Mirrors the
+    // client override in Starling-TUI/src/net.rs for parity.
+    if let Ok(url) = std::env::var("STARLING_RELAY") {
+        let relay: RelayUrl = url.parse()?;
+        builder = builder.relay_mode(RelayMode::Custom(relay.into()));
+    }
+    let endpoint = builder.bind().await.map_err(|e| {
+        starling::logger::error(&format!("endpoint bind failed for roost '{name}': {e}"));
+        e
+    })?;
     endpoint.online().await;
 
     let my_id = endpoint.addr().id;
+    {
+        let mut st = state.lock().unwrap();
+        st.perms.owner = Some(my_id);
+    }
     let code = encode_roost_code(&my_id);
     println!("✓ roost '{name}' is online");
     println!("  code: {code}");
@@ -184,33 +204,82 @@ pub async fn open(name: &str) -> anyhow::Result<()> {
             ROOST_SYNC_ALPN,
             RoostSync {
                 store: store.clone(),
+                state: state.clone(),
+            },
+        )
+        .accept(
+            MOD_ALPN,
+            ModProto {
+                state: state.clone(),
+                store: store.clone(),
+            },
+        )
+        .accept(
+            JOIN_ALPN,
+            JoinProto {
+                state: state.clone(),
+                store: store.clone(),
             },
         )
         .spawn();
 
-    for chan in &state.channels {
+    // The channel list is captured once at startup; live channel add/remove is
+    // a follow-on. Secrets are minted and persisted by the store, never derived
+    // from the public code, so non-members can't decrypt channel gossip.
+    let startup_channels = state.lock().unwrap().channels.clone();
+    for chan in &startup_channels {
         let topic = topic_for(&format!("starling/roost/{code}/{chan}"));
-        let crypto = FlockCrypto::from_room_code(&format!("{code}/{chan}"));
+        let secret = match store.channel_secret(chan) {
+            Ok(secret) => secret,
+            Err(e) => {
+                starling::logger::error(&format!(
+                    "roost: failed to load channel secret for '{chan}': {e}"
+                ));
+                continue;
+            }
+        };
+        let crypto = FlockCrypto::from_secret(&secret);
         let (_sender, mut rx) = gossip.subscribe(topic, vec![]).await?.split();
         let (st, ch) = (store.clone(), chan.clone());
 
         tokio::spawn(async move {
             while let Some(Ok(Event::Received(msg))) = rx.next().await {
-                if let Some(plain) = crypto.decrypt(&msg.content) {
-                    match postcard::from_bytes::<GossipPayload>(&plain) {
-                        Ok(GossipPayload::Chat(m)) => {
+                // Phase 9: clients broadcast `postcard(Signed)` envelopes. We
+                // authenticate the signature before persisting so a forged
+                // `ChatMessage.author` attributed to another bird never lands
+                // in history. A legacy unsigned `GossipPayload` still decrypts
+                // (older peers); we persist those the legacy way to keep a V0
+                // roost that broadcasts during migration readable.
+                match receive_payload(&crypto, &msg.content) {
+                    Ok(Some(envelope)) => match envelope.payload {
+                        GossipPayload::Chat(m) => {
                             if let Err(e) = st.append(&ch, &m) {
                                 starling::logger::error(&format!(
                                     "roost: failed to persist message in '{ch}': {e}"
                                 ));
                             }
                         }
-                        Ok(_) => {}
-                        Err(e) => {
+                        _ => {}
+                    },
+                    Ok(None) => {
+                        if let Some(plain) = crypto.decrypt(&msg.content)
+                            && let Ok(GossipPayload::Chat(m)) =
+                                postcard::from_bytes::<GossipPayload>(&plain)
+                        {
                             starling::logger::warn(&format!(
-                                "roost: failed to deserialize gossip payload: {e}"
+                                "roost: persisting legacy unsigned chat from anonymous peer in '{ch}'"
                             ));
+                            if let Err(e) = st.append(&ch, &m) {
+                                starling::logger::error(&format!(
+                                    "roost: failed to persist message in '{ch}': {e}"
+                                ));
+                            }
                         }
+                    }
+                    Err(e) => {
+                        starling::logger::warn(&format!(
+                            "roost: gossip frame rejected on channel '{ch}': {e}"
+                        ));
                     }
                 }
             }
@@ -222,30 +291,49 @@ pub async fn open(name: &str) -> anyhow::Result<()> {
 
     let control_key = format!("{code}/_control");
     let control = topic_for(&format!("starling/roost/{control_key}"));
-    let ctl_crypto = FlockCrypto::from_room_code(&control_key);
+    // Phase 9: the control channel (where RoostState — including the ban list
+    // and member roster — is broadcast) is now encrypted with a high-entropy
+    // secret minted by the store, not derivable from the public roost code.
+    // A non-member who merely knows the invite code can no longer read the
+    // member list. The secret is handed to admitted birds through the join
+    // handshake alongside the per-channel secrets.
+    let control_secret = store.control_secret()?;
+    let ctl_crypto = FlockCrypto::from_secret(&control_secret);
     let (ctl_tx, mut ctl_rx) = gossip.subscribe(control, vec![]).await?.split();
 
     loop {
         tokio::select! {
-            Some(Ok(Event::NeighborUp(_))) = ctl_rx.next() => {
-                match postcard::to_stdvec(&state) {
-                    Ok(blob) => {
-                        let encrypted = ctl_crypto.encrypt(&blob);
-                        if let Err(e) = ctl_tx.broadcast(encrypted.into()).await {
-                            starling::logger::warn(&format!(
-                                "roost: failed to broadcast state on control channel: {e}"
-                            ));
+            event = ctl_rx.next() => {
+                match event {
+                    Some(Ok(Event::NeighborUp(_))) => {
+                        let snapshot = state.lock().unwrap().clone();
+                        match postcard::to_stdvec(&snapshot) {
+                            Ok(blob) => {
+                                let encrypted = ctl_crypto.encrypt(&blob);
+                                if let Err(e) = ctl_tx.broadcast(encrypted.into()).await {
+                                    starling::logger::warn(&format!(
+                                        "roost: failed to broadcast state on control channel: {e}"
+                                    ));
+                                }
+                            }
+                            Err(e) => {
+                                starling::logger::error(&format!(
+                                    "roost: failed to serialise roost state: {e}"
+                                ));
+                            }
                         }
                     }
-                    Err(e) => {
-                        starling::logger::error(&format!(
-                            "roost: failed to serialise roost state: {e}"
+                    Some(Ok(_)) => {}
+                    Some(Err(e)) => {
+                        starling::logger::warn(&format!(
+                            "roost: control subscription error: {e}"
                         ));
                     }
+                    None => {
+                        starling::logger::warn("roost: control subscription ended");
+                        return Ok(());
+                    }
                 }
-            }
-            else => {
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
         }
     }
@@ -359,6 +447,7 @@ pub fn logs(name: &str) -> anyhow::Result<()> {
 
 /// ALPN used by clients to request persisted channel history.
 pub const ROOST_SYNC_ALPN: &[u8] = b"starling/roost-sync/0";
+const MAX_ROOST_SYNC_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 
 /// Wire request for roost history. Responses are postcard-encoded
 /// `Vec<starling::event::ChatMessage>` values capped at 500 messages.
@@ -371,6 +460,7 @@ pub struct RoostSyncRequest {
 #[derive(Debug, Clone)]
 struct RoostSync {
     store: Arc<Store>,
+    state: Arc<Mutex<RoostState>>,
 }
 
 impl iroh::protocol::ProtocolHandler for RoostSync {
@@ -378,6 +468,13 @@ impl iroh::protocol::ProtocolHandler for RoostSync {
         &self,
         conn: iroh::endpoint::Connection,
     ) -> Result<(), iroh::protocol::AcceptError> {
+        // The door check: only members may pull history. The caller's identity is
+        // authenticated by the transport, so it cannot be spoofed by a client.
+        let who = conn.remote_id();
+        if !self.state.lock().unwrap().perms.is_active_member(&who) {
+            starling::logger::warn(&format!("roost-sync: refused non-member {who}"));
+            return Ok(());
+        }
         let Ok((mut send, mut recv)) = conn.accept_bi().await else {
             starling::logger::warn("roost-sync: failed to accept bi stream");
             return Ok(());
@@ -401,7 +498,14 @@ impl iroh::protocol::ProtocolHandler for RoostSync {
         };
         match postcard::to_stdvec(&history) {
             Ok(bytes) => {
-                if let Err(e) = send.write_all(&bytes).await {
+                if bytes.len() > MAX_ROOST_SYNC_RESPONSE_BYTES {
+                    starling::logger::warn(&format!(
+                        "roost-sync: response for #{} is {} bytes, exceeds limit {}",
+                        request.channel,
+                        bytes.len(),
+                        MAX_ROOST_SYNC_RESPONSE_BYTES
+                    ));
+                } else if let Err(e) = send.write_all(&bytes).await {
                     starling::logger::warn(&format!("roost-sync: failed to send history: {e}"));
                 }
                 let _ = send.finish();
@@ -411,6 +515,164 @@ impl iroh::protocol::ProtocolHandler for RoostSync {
             }
         }
 
+        conn.closed().await;
+        Ok(())
+    }
+}
+
+/// ALPN for the moderation protocol: ban/kick/invite/delete, each re-checked
+/// roost-side against the sender's authenticated identity.
+pub const MOD_ALPN: &[u8] = b"starling/mod/0";
+
+#[derive(Debug, Clone)]
+struct ModProto {
+    state: Arc<Mutex<RoostState>>,
+    store: Arc<Store>,
+}
+
+impl iroh::protocol::ProtocolHandler for ModProto {
+    async fn accept(
+        &self,
+        conn: iroh::endpoint::Connection,
+    ) -> Result<(), iroh::protocol::AcceptError> {
+        let from = conn.remote_id();
+        if !self.state.lock().unwrap().perms.is_active_member(&from) {
+            return Ok(());
+        }
+        let Ok((mut send, mut recv)) = conn.accept_bi().await else {
+            return Ok(());
+        };
+        let Ok(bytes) = recv.read_to_end(1024).await else {
+            return Ok(());
+        };
+        let Ok(req) = postcard::from_bytes::<ModRequest>(&bytes) else {
+            return Ok(());
+        };
+
+        // Compute the verdict under the lock, then drop it before any await.
+        // Compute the verdict under the lock, then drop it before any await. On a
+        // successful mutation we snapshot perms and persist them so the roost's
+        // member list, invitations, and bans survive a restart.
+        let (verdict, dirty): (Result<(), String>, bool) = {
+            let mut st = self.state.lock().unwrap();
+            match req {
+                ModRequest::Ban(target) => {
+                    let r = st.perms.handle_ban(&from, &target);
+                    let ok = r.is_ok();
+                    (r.map_err(|e| e.to_string()), ok)
+                }
+                ModRequest::Kick(target) => {
+                    let r = st.perms.handle_kick(&from, &target);
+                    let ok = r.is_ok();
+                    (r.map_err(|e| e.to_string()), ok)
+                }
+                ModRequest::Invite(target) => {
+                    let r = st.perms.handle_invite(&from, target);
+                    let ok = r.is_ok();
+                    (r.map_err(|e| e.to_string()), ok)
+                }
+                ModRequest::DeleteMessage { channel, id } => {
+                    let allowed = st.perms.effective(&from).contains(Perm::MANAGE_MSGS);
+                    if !allowed {
+                        (Err("not allowed".into()), false)
+                    } else {
+                        match self.store.delete_message(&channel, &id) {
+                            Ok(true) => (Ok(()), false),
+                            Ok(false) => (Err("message not found".into()), false),
+                            Err(e) => (Err(e.to_string()), false),
+                        }
+                    }
+                }
+            }
+        };
+        if dirty {
+            let snapshot = self.state.lock().unwrap().perms.clone();
+            if let Err(e) = self.store.save_perms(&snapshot) {
+                starling::logger::warn(&format!("roost: failed to persist perms: {e}"));
+            }
+        }
+
+        let verdict = verdict;
+
+        let _ = send
+            .write_all(&postcard::to_stdvec(&verdict).unwrap_or_default())
+            .await;
+        let _ = send.finish();
+        conn.closed().await;
+        Ok(())
+    }
+}
+
+/// ALPN for the join handshake: the only way to receive channel secrets. The
+/// roost authenticates the caller's identity from the transport, runs the door
+/// check, and on success returns the welcome (name + per-channel keys).
+pub const JOIN_ALPN: &[u8] = b"starling/roost-join/0";
+const MAX_JOIN_RESPONSE_BYTES: usize = 65_536;
+
+#[derive(Debug, Clone)]
+struct JoinProto {
+    state: Arc<Mutex<RoostState>>,
+    store: Arc<Store>,
+}
+
+impl iroh::protocol::ProtocolHandler for JoinProto {
+    async fn accept(
+        &self,
+        conn: iroh::endpoint::Connection,
+    ) -> Result<(), iroh::protocol::AcceptError> {
+        let who = conn.remote_id();
+        let Ok(mut send) = conn.open_uni().await else {
+            return Ok(());
+        };
+
+        // The door check: invited birds become members on first join; banned
+        // birds and uninvited strangers are refused.
+        //
+        // On success, the welcome carries per-channel secrets AND the control
+        // channel secret. All three are high-entropy random values minted by
+        // the store; none are derivable from the public roost code.
+        let verdict: Result<RoostWelcome, String> = {
+            let mut st = self.state.lock().unwrap();
+            match st.perms.handle_join(&who) {
+                Ok(()) => {
+                    // Persist the updated membership so it survives a restart.
+                    let snapshot = st.perms.clone();
+                    let channels = st
+                        .channels
+                        .iter()
+                        .filter_map(|c| Some((c.clone(), self.store.channel_secret(c).ok()?)))
+                        .collect();
+                    let control_secret = self.store.control_secret().ok();
+                    if control_secret.is_none() {
+                        starling::logger::warn(&format!(
+                            "roost-join: control secret unavailable for {who}"
+                        ));
+                    }
+                    if let Err(e) = self.store.save_perms(&snapshot) {
+                        starling::logger::warn(&format!(
+                            "roost: failed to persist perms after join: {e}"
+                        ));
+                    }
+                    Ok(RoostWelcome {
+                        name: st.name.clone(),
+                        channels,
+                        control_secret,
+                    })
+                }
+                Err(e) => Err(e.to_string()),
+            }
+        };
+
+        let encoded = postcard::to_stdvec(&verdict).unwrap_or_default();
+        if encoded.len() <= MAX_JOIN_RESPONSE_BYTES {
+            let _ = send.write_all(&encoded).await;
+        } else {
+            starling::logger::warn(&format!(
+                "roost-join: welcome for {who} is {} bytes, exceeds limit",
+                encoded.len()
+            ));
+        }
+        let _ = send.finish();
         conn.closed().await;
         Ok(())
     }
