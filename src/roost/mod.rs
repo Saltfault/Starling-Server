@@ -203,7 +203,14 @@ pub async fn open(name: &str) -> anyhow::Result<()> {
         starling::logger::error(&format!("endpoint bind failed for roost '{name}': {e}"));
         e
     })?;
-    endpoint.online().await;
+    if tokio::time::timeout(std::time::Duration::from_secs(10), endpoint.online())
+        .await
+        .is_err()
+    {
+        starling::logger::warn(&format!(
+            "roost '{name}': not reachable yet (starting degraded)"
+        ));
+    }
 
     let my_id = endpoint.addr().id;
     {
