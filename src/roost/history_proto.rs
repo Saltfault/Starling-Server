@@ -1,6 +1,6 @@
 //! Bounded, authorized History V1 protocol handler.
 
-use std::collections::HashSet;
+use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -19,7 +19,7 @@ const RESPONSE_PAYLOAD_LIMIT: usize = MAX_BODY_BYTES - 4096;
 
 type AuthorizeRemote =
     dyn Fn(iroh::EndpointId, &HistoryRequest, &MembershipState) -> bool + Send + Sync;
-type ChallengeCache = Arc<Mutex<HashSet<(iroh::EndpointId, [u8; 32])>>>;
+type ChallengeCache = Arc<Mutex<lru::LruCache<(iroh::EndpointId, [u8; 32]), ()>>>;
 
 #[derive(Clone)]
 pub struct HistoryProto {
@@ -47,7 +47,9 @@ impl HistoryProto {
         Self {
             store,
             authorize_remote: Arc::new(authorize_remote),
-            seen_challenges: Arc::new(Mutex::new(HashSet::new())),
+            seen_challenges: Arc::new(Mutex::new(lru::LruCache::new(
+                NonZeroUsize::new(MAX_HISTORY_HASHES).unwrap(),
+            ))),
         }
     }
 
@@ -77,13 +79,9 @@ impl HistoryProto {
                 .lock()
                 .map_err(|_| anyhow::anyhow!("history challenge lock poisoned"))?;
             ensure!(
-                seen.insert((remote, request.challenge)),
+                seen.put((remote, request.challenge), ()).is_none(),
                 "history challenge was replayed"
             );
-            if seen.len() > MAX_HISTORY_HASHES {
-                seen.clear();
-                seen.insert((remote, request.challenge));
-            }
         }
 
         // Clone membership before any await. Missing V1 state and failed remote

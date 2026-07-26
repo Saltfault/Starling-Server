@@ -49,7 +49,7 @@ All roost commands take the roost's `<name>`.
 | `starling roost create <name>` | ✅ | Create a roost: identity key + sled database. Prints the invite code |
 | `starling roost setup <name>` | ✅ | Alias for `create` |
 | `starling roost open <name>` | ✅ | Start the roost (blocks until Ctrl+C). Persists messages, serves history |
-| `starling roost close <name>` | ✅ | Prints how to stop a running roost (Ctrl+C, or your service manager) |
+| `starling roost close <name>` | ✅ | Gracefully stops a running roost |
 | `starling roost destroy <name>` | ✅ | Delete a roost and **all** its data |
 | `starling roost invite <name>` | ✅ | Print the roost's invite code |
 | `starling roost status <name>` | ✅ | Show roost info (identity, data path, and more) |

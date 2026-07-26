@@ -41,27 +41,19 @@ fn main() -> anyhow::Result<()> {
                 .block_on(starling_server::roost::open(&name))
         }
         Some("close") => {
-            let _name = args.get(3).cloned().unwrap_or_else(|| {
+            let name = args.get(3).cloned().unwrap_or_else(|| {
                 eprintln!("Usage: starling roost close <name>");
                 std::process::exit(1);
             });
-            eprintln!("To close a roost, press Ctrl+C in the terminal where it's running.");
-            eprintln!("If the roost is running as a system service, use your service manager.");
-            Ok(())
-        }
-        Some("setup") => {
-            let name = args.get(3).cloned().unwrap_or_else(|| {
-                eprintln!("Usage: starling roost setup <name>");
-                std::process::exit(1);
-            });
-            starling_server::roost::create(&name)
+            starling_server::roost::request_shutdown(&name)
         }
         Some("destroy") => {
             let name = args.get(3).cloned().unwrap_or_else(|| {
-                eprintln!("Usage: starling roost destroy <name>");
+                eprintln!("Usage: starling roost destroy <name> [--force]");
                 std::process::exit(1);
             });
-            starling_server::roost::destroy(&name)
+            let force = args.get(4).map(String::as_str) == Some("--force");
+            starling_server::roost::destroy(&name, force)
         }
         Some("invite") => {
             let name = args.get(3).cloned().unwrap_or_else(|| {
@@ -92,37 +84,34 @@ fn main() -> anyhow::Result<()> {
             starling_server::roost::logs(&name)
         }
         Some("members") => {
-            let _name = args.get(3).cloned().unwrap_or_else(|| {
+            let name = args.get(3).cloned().unwrap_or_else(|| {
                 eprintln!("Usage: starling roost members <name>");
                 std::process::exit(1);
             });
-            eprintln!("members: not yet implemented (coming in Phase 9)");
-            Ok(())
+            starling_server::roost::members(&name)
         }
         Some("channel") => match args.get(3).map(String::as_str) {
             Some("add") => {
-                let _name = args.get(4).cloned().unwrap_or_else(|| {
+                let name = args.get(4).cloned().unwrap_or_else(|| {
                     eprintln!("Usage: starling roost channel add <name> <channel>");
                     std::process::exit(1);
                 });
-                let _channel = args.get(5).cloned().unwrap_or_else(|| {
+                let channel = args.get(5).cloned().unwrap_or_else(|| {
                     eprintln!("Usage: starling roost channel add <name> <channel>");
                     std::process::exit(1);
                 });
-                eprintln!("channel add: not yet implemented (coming in Phase 8)");
-                Ok(())
+                starling_server::roost::add_channel(&name, &channel)
             }
             Some("remove") => {
-                let _name = args.get(4).cloned().unwrap_or_else(|| {
+                let name = args.get(4).cloned().unwrap_or_else(|| {
                     eprintln!("Usage: starling roost channel remove <name> <channel>");
                     std::process::exit(1);
                 });
-                let _channel = args.get(5).cloned().unwrap_or_else(|| {
+                let channel = args.get(5).cloned().unwrap_or_else(|| {
                     eprintln!("Usage: starling roost channel remove <name> <channel>");
                     std::process::exit(1);
                 });
-                eprintln!("channel remove: not yet implemented (coming in Phase 8)");
-                Ok(())
+                starling_server::roost::remove_channel(&name, &channel)
             }
             _ => {
                 eprintln!("Usage: starling roost channel add|remove <name> <channel>");

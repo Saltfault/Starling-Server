@@ -10,6 +10,7 @@ const KEY_VERSION: u8 = 1;
 const CHANNEL_SECRET_PREFIX: u8 = 2;
 const PERMS_KEY: u8 = 3;
 const CONTROL_SECRET_KEY: u8 = 4;
+const CHANNELS_KEY: u8 = 5;
 
 /// A sled-backed message store.
 #[derive(Debug)]
@@ -88,6 +89,23 @@ impl Store {
         Ok(())
     }
 
+    /// Load the persisted channel list, if any. Returns `None` for a fresh roost
+    /// that has never persisted channels.
+    pub fn load_channels(&self) -> anyhow::Result<Option<Vec<String>>> {
+        let Some(bytes) = self.db.get([CHANNELS_KEY])? else {
+            return Ok(None);
+        };
+        Ok(Some(postcard::from_bytes(bytes.as_ref())?))
+    }
+
+    /// Persist the channel list so it survives a roost restart.
+    pub fn save_channels(&self, channels: &[String]) -> anyhow::Result<()> {
+        self.db
+            .insert([CHANNELS_KEY], postcard::to_stdvec(channels)?)?;
+        self.db.flush()?;
+        Ok(())
+    }
+
     /// Delete a single message by id from a channel's persisted history. Used by
     /// the moderation `DeleteMessage` action. This only removes the roost's copy;
     /// a gossip delete-tombstone to retract from clients' local history is a
@@ -124,9 +142,9 @@ impl Store {
 
         let mut messages = Vec::new();
         let prefix = channel_prefix(channel);
-        let mut scanned = 0usize;
+        let mut scanned_new = 0usize;
         for item in self.db.scan_prefix(prefix) {
-            if scanned >= MAX_SCAN_MESSAGES {
+            if scanned_new >= MAX_SCAN_MESSAGES {
                 break;
             }
             let (_, value) = item?;
@@ -134,12 +152,13 @@ impl Store {
             if message.ts > since {
                 messages.push(message);
             }
-            scanned += 1;
+            scanned_new += 1;
         }
 
         let legacy_prefix = format!("{channel}/");
+        let mut scanned_legacy = 0usize;
         for item in self.db.scan_prefix(legacy_prefix.as_bytes()) {
-            if scanned >= MAX_SCAN_MESSAGES {
+            if scanned_legacy >= MAX_SCAN_MESSAGES {
                 break;
             }
             let (_, value) = item?;
@@ -147,11 +166,12 @@ impl Store {
             if message.ts > since {
                 messages.push(message);
             }
-            scanned += 1;
+            scanned_legacy += 1;
         }
 
         messages.sort_by(|a, b| a.ts.cmp(&b.ts).then_with(|| a.id.cmp(&b.id)));
-        messages.dedup_by(|a, b| a.id == b.id);
+        let mut seen = std::collections::HashSet::new();
+        messages.retain(|m| seen.insert(m.id.clone()));
         if messages.len() > MAX_BACKFILL_MESSAGES {
             messages.drain(..messages.len() - MAX_BACKFILL_MESSAGES);
         }
