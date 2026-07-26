@@ -137,7 +137,7 @@ pub async fn open(name: &str) -> anyhow::Result<()> {
     // opening the same sled database concurrently (platform-dependent
     // corruption risk with multiple writers).
     let lock_path = roost_data_dir(name).join("lock.pid");
-    let mut lock = std::fs::File::create(&lock_path).map_err(|e| {
+    let lock = std::fs::File::create(&lock_path).map_err(|e| {
         anyhow::anyhow!(
             "roost '{name}': cannot create lock file at {}: {e}",
             lock_path.display()

@@ -14,6 +14,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0.104"
+fs2 = "0.4"
 iroh = "1.0.3"
 iroh-gossip = "0.101.0"
 n0-future = "0.3.2"
@@ -22,3 +23,6 @@ serde = { version = "1.0.229", features = ["derive"] }
 sled = "0.34"
 starling = { git = "https://forgejo.hearthhome.lol/Saltfault/Starling.git" }
 tokio = { version = "1.53.1", features = ["full"] }
+
+[patch."https://forgejo.hearthhome.lol/Saltfault/Starling.git"]
+starling = { path = "../starling" }
