@@ -556,35 +556,34 @@ pub async fn open(
                                             println!("Invalid channel name: {e}");
                                             continue;
                                         }
-                                        let mut st = state.lock().unwrap_or_else(|p| p.into_inner());
-                                        if st.channels.len() >= starling::roost::MAX_CHANNELS {
-                                            println!(
-                                                "Cannot add channel: maximum of {} channels reached",
-                                                starling::roost::MAX_CHANNELS
-                                            );
-                                            drop(st);
-                                            continue;
-                                        }
-                                        if st.channels.contains(&channel) {
-                                            println!("Channel '{channel}' already exists");
-                                            drop(st);
-                                            continue;
-                                        }
-                                        // Mint the channel secret so the gossip task can
-                                        // subscribe immediately.
-                                        if let Err(e) = store.channel_secret(&channel) {
-                                            println!("Failed to mint channel secret: {e}");
-                                            drop(st);
-                                            continue;
-                                        }
-                                        st.channels.push(channel.clone());
-                                        if let Err(e) = store.save_channels(&st.channels) {
-                                            println!("Failed to save channels: {e}");
-                                            drop(st);
-                                            continue;
-                                        }
-                                        let snapshot = st.clone();
-                                        drop(st);
+                                        let snapshot = {
+                                            let mut st = state.lock().unwrap_or_else(|p| p.into_inner());
+                                            if st.channels.len() >= starling::roost::MAX_CHANNELS {
+                                                println!(
+                                                    "Cannot add channel: maximum of {} channels reached",
+                                                    starling::roost::MAX_CHANNELS
+                                                );
+                                                None
+                                            } else if st.channels.contains(&channel) {
+                                                println!("Channel '{channel}' already exists");
+                                                None
+                                            } else if let Err(e) = store.channel_secret(&channel) {
+                                                // Mint the channel secret so the gossip task can
+                                                // subscribe immediately.
+                                                println!("Failed to mint channel secret: {e}");
+                                                None
+                                            } else {
+                                                st.channels.push(channel.clone());
+                                                match store.save_channels(&st.channels) {
+                                                    Ok(()) => Some(st.clone()),
+                                                    Err(e) => {
+                                                        println!("Failed to save channels: {e}");
+                                                        None
+                                                    }
+                                                }
+                                            }
+                                        };
+                                        let Some(snapshot) = snapshot else { continue };
                                         let _ = console_state_tx.send(snapshot).await;
                                         println!("Channel '{channel}' added");
                                         starling::logger::info(&format!(
@@ -601,20 +600,23 @@ pub async fn open(
                                             println!("Cannot remove the 'general' channel");
                                             continue;
                                         }
-                                        let mut st = state.lock().unwrap_or_else(|p| p.into_inner());
-                                        if !st.channels.contains(&channel) {
-                                            println!("Channel '{channel}' does not exist");
-                                            drop(st);
-                                            continue;
-                                        }
-                                        st.channels.retain(|c| c != &channel);
-                                        if let Err(e) = store.save_channels(&st.channels) {
-                                            println!("Failed to save channels: {e}");
-                                            drop(st);
-                                            continue;
-                                        }
-                                        let snapshot = st.clone();
-                                        drop(st);
+                                        let snapshot = {
+                                            let mut st = state.lock().unwrap_or_else(|p| p.into_inner());
+                                            if !st.channels.contains(&channel) {
+                                                println!("Channel '{channel}' does not exist");
+                                                None
+                                            } else {
+                                                st.channels.retain(|c| c != &channel);
+                                                match store.save_channels(&st.channels) {
+                                                    Ok(()) => Some(st.clone()),
+                                                    Err(e) => {
+                                                        println!("Failed to save channels: {e}");
+                                                        None
+                                                    }
+                                                }
+                                            }
+                                        };
+                                        let Some(snapshot) = snapshot else { continue };
                                         let _ = console_state_tx.send(snapshot).await;
                                         println!("Channel '{channel}' removed");
                                         starling::logger::info(&format!(
