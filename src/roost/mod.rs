@@ -455,6 +455,15 @@ pub async fn open(
         println!("  invite code: {}", code);
     }
 
+    // Periodic control-channel heartbeat so a subscriber that misses the
+    // NeighborUp-triggered state broadcast (e.g. a saved-context rejoin where
+    // gossip mesh formation over a relay outpaces the single NeighborUp
+    // broadcast) still converges on the current RoostState within a few
+    // seconds instead of timing out.
+    let mut control_heartbeat = tokio::time::interval(std::time::Duration::from_secs(5));
+    control_heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    control_heartbeat.tick().await; // discard the immediate first tick
+
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
@@ -465,6 +474,29 @@ pub async fn open(
                 store.db().flush()?;
                 history_store.flush()?;
                 return Ok(());
+            }
+            _ = control_heartbeat.tick() => {
+                // Heartbeat: re-broadcast the current state so a subscriber
+                // that missed the NeighborUp broadcast still converges.
+                let snapshot =
+                    state.lock().unwrap_or_else(|p| p.into_inner()).clone();
+                match postcard::to_stdvec(&snapshot) {
+                    Ok(blob) => match ctl_crypto.try_encrypt(&blob) {
+                        Ok(encrypted) => {
+                            if let Err(e) = ctl_tx.broadcast(encrypted.into()).await {
+                                starling::logger::warn(&format!(
+                                    "roost: heartbeat broadcast failed: {e}"
+                                ));
+                            }
+                        }
+                        Err(e) => starling::logger::error(&format!(
+                            "roost: heartbeat control encrypt failed: {e}"
+                        )),
+                    },
+                    Err(e) => starling::logger::error(&format!(
+                        "roost: heartbeat failed to serialise roost state: {e}"
+                    )),
+                }
             }
             cmd = console_rx.recv() => {
                 if let Some(line) = cmd {
