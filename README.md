@@ -55,9 +55,9 @@ All roost commands take the roost's `<name>`.
 | `starling roost status <name>` | ✅ | Show roost info (identity, data path, and more) |
 | `starling roost doctor <name>` | ✅ | Diagnose a roost's setup |
 | `starling roost logs <name>` | ✅ | Show the roost's log location |
-| `starling roost members <name>` | 📋 | List members — arrives with roles (Phase 8/9) |
-| `starling roost channel add <name> <ch>` | 📋 | Add a channel — arrives with roles (Phase 8) |
-| `starling roost channel remove <name> <ch>` | 📋 | Remove a channel — arrives with roles (Phase 8) |
+| `starling roost members <name>` | ✅ | List members with roles and bans |
+| `starling roost channel add <name> <ch>` | ✅ | Add a channel (roost must be stopped) |
+| `starling roost channel remove <name> <ch>` | ✅ | Remove a channel (roost must be stopped) |
 | `starling install server` | ✅ | Install (or reinstall) the roost server |
 | `starling update server` | ✅ | Update the server to the latest version |
 | `starling uninstall server` | ✅ | Uninstall the server and remove config/roost data |
