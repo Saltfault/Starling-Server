@@ -5,7 +5,7 @@ pub mod store;
 use history_proto::HistoryProto;
 use history_store::HistoryStore;
 use iroh::{Endpoint, RelayMode, RelayUrl, endpoint::presets, protocol::Router};
-use iroh_gossip::api::Event;
+use iroh_gossip::api::{Event, GossipSender};
 use iroh_gossip::net::{GOSSIP_ALPN, Gossip};
 use n0_future::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -359,75 +359,7 @@ pub async fn open(
     let subscribed_channels: Arc<std::sync::Mutex<HashMap<String, tokio::task::JoinHandle<()>>>> =
         Arc::new(std::sync::Mutex::new(HashMap::new()));
     for chan in &startup_channels {
-        let topic = topic_for(&format!("starling/roost/{code}/{chan}"));
-        let secret = match store.channel_secret(chan) {
-            Ok(secret) => secret,
-            Err(e) => {
-                starling::logger::error(&format!(
-                    "roost: failed to load channel secret for '{chan}': {e}"
-                ));
-                continue;
-            }
-        };
-        let crypto = FlockCrypto::from_secret(&secret);
-        let (_sender, mut rx) = match gossip.subscribe(topic, vec![]).await {
-            Ok(sub) => sub.split(),
-            Err(e) => {
-                starling::logger::error(&format!("roost: subscribe failed for '{chan}': {e}"));
-                continue;
-            }
-        };
-        let (st, ch) = (store.clone(), chan.clone());
-        let chan_for_map = chan.clone();
-
-        let handle = tokio::spawn(async move {
-            while let Some(Ok(Event::Received(msg))) = rx.next().await {
-                // Phase 9: clients broadcast `postcard(Signed)` envelopes. We
-                // authenticate the signature before persisting so a forged
-                // `ChatMessage.author` attributed to another bird never lands
-                // in history. A legacy unsigned `GossipPayload` still decrypts
-                // (older peers); we persist those the legacy way to keep a V0
-                // roost that broadcasts during migration readable.
-                match receive_payload(&crypto, &msg.content) {
-                    Ok(Some(envelope)) => {
-                        if let GossipPayload::Chat(m) = envelope.payload
-                            && let Err(e) = st.append(&ch, &m)
-                        {
-                            starling::logger::error(&format!(
-                                "roost: failed to persist message in '{ch}': {e}"
-                            ));
-                        }
-                    }
-                    Ok(None) => {
-                        if let Some(plain) = crypto.decrypt(&msg.content)
-                            && let Ok(GossipPayload::Chat(m)) =
-                                postcard::from_bytes::<GossipPayload>(&plain)
-                        {
-                            starling::logger::warn(&format!(
-                                "roost: persisting legacy unsigned chat from anonymous peer in '{ch}'"
-                            ));
-                            if let Err(e) = st.append(&ch, &m) {
-                                starling::logger::error(&format!(
-                                    "roost: failed to persist message in '{ch}': {e}"
-                                ));
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        starling::logger::warn(&format!(
-                            "roost: gossip frame rejected on channel '{ch}': {e}"
-                        ));
-                    }
-                }
-            }
-            starling::logger::warn(&format!(
-                "roost: gossip subscription ended for channel '{ch}'"
-            ));
-        });
-        subscribed_channels
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(chan_for_map, handle);
+        spawn_channel_task(&gossip, &store, &code, chan, &subscribed_channels).await;
     }
 
     let control_key = format!("{code}/_control");
@@ -480,190 +412,28 @@ pub async fn open(
                 // that missed the NeighborUp broadcast still converges.
                 let snapshot =
                     state.lock().unwrap_or_else(|p| p.into_inner()).clone();
-                match postcard::to_stdvec(&snapshot) {
-                    Ok(blob) => match ctl_crypto.try_encrypt(&blob) {
-                        Ok(encrypted) => {
-                            if let Err(e) = ctl_tx.broadcast(encrypted.into()).await {
-                                starling::logger::warn(&format!(
-                                    "roost: heartbeat broadcast failed: {e}"
-                                ));
-                            }
-                        }
-                        Err(e) => starling::logger::error(&format!(
-                            "roost: heartbeat control encrypt failed: {e}"
-                        )),
-                    },
-                    Err(e) => starling::logger::error(&format!(
-                        "roost: heartbeat failed to serialise roost state: {e}"
-                    )),
-                }
+                broadcast_state(&snapshot, &ctl_crypto, &ctl_tx).await;
             }
             cmd = console_rx.recv() => {
                 if let Some(line) = cmd {
                     if line.is_empty() {
                         continue;
                     }
-                    let parts: Vec<&str> = line.split_whitespace().collect();
-                    match parts.first().copied() {
-                            Some("help") | Some("h") | Some("?") => {
-                                println!("Available commands:");
-                                println!("  status               — show roost info");
-                                println!("  members              — list members");
-                                println!("  invite               — show invite code");
-                                println!("  channel add <name>   — add a channel");
-                                println!("  channel remove <name> — remove a channel");
-                                println!("  logs                 — show log file path");
-                                println!("  quit | exit          — shut down the roost");
-                                println!("  help                 — show this help");
-                            }
-                            Some("status") | Some("s") => {
-                                let st = state.lock().unwrap_or_else(|p| p.into_inner());
-                                println!("Roost: {name}");
-                                println!("  invite code: {code}");
-                                println!("  channels: {}", st.channels.join(", "));
-                                println!("  members: {}", st.perms.members.len());
-                                println!("  directory: {}", dir.display());
-                                drop(st);
-                                let db_size = store
-                                    .db()
-                                    .size_on_disk()
-                                    .map(|s| format!("{} bytes", s))
-                                    .unwrap_or_else(|_| "unknown".into());
-                                println!("  db size: {db_size}");
-                            }
-                            Some("members") | Some("m") => {
-                                let st = state.lock().unwrap_or_else(|p| p.into_inner());
-                                if let Some(owner) = &st.perms.owner {
-                                    println!("  owner: {}", starling::logger::fingerprint(owner.as_bytes()));
-                                }
-                                for member in st.perms.members.keys() {
-                                    println!(
-                                        "  member: {}",
-                                        starling::logger::fingerprint(member.as_bytes())
-                                    );
-                                }
-                                if !st.perms.bans.is_empty() {
-                                    println!("  bans ({}):", st.perms.bans.len());
-                                    for ban in &st.perms.bans {
-                                        println!(
-                                            "    - {}",
-                                            starling::logger::fingerprint(ban.as_bytes())
-                                        );
-                                    }
-                                }
-                                if !st.perms.invited.is_empty() {
-                                    println!("  pending invites: {}", st.perms.invited.len());
-                                }
-                            }
-                            Some("invite") | Some("i") => {
-                                println!("{code}");
-                            }
-                            Some("logs") | Some("l") => {
-                                if let Some(log_path) = starling::logger::path() {
-                                    println!("{}", log_path.display());
-                                } else {
-                                    println!("Log file not available");
-                                }
-                            }
-                            Some("quit") | Some("exit") | Some("q") => {
-                                if !silent {
-                                    println!("Shutting down...");
-                                }
-                                starling::logger::info(&format!(
-                                    "roost '{name}': shutting down on console command"
-                                ));
-                                store.db().flush()?;
-                                history_store.flush()?;
-                                return Ok(());
-                            }
-                            Some("channel") => {
-                                match parts.get(1).copied() {
-                                    Some("add") => {
-                                        let Some(channel) = parts.get(2) else {
-                                            println!("Usage: channel add <name>");
-                                            continue;
-                                        };
-                                        let channel = channel.to_string();
-                                        if let Err(e) = store::validate_channel(&channel) {
-                                            println!("Invalid channel name: {e}");
-                                            continue;
-                                        }
-                                        let snapshot = {
-                                            let mut st = state.lock().unwrap_or_else(|p| p.into_inner());
-                                            if st.channels.len() >= starling::roost::MAX_CHANNELS {
-                                                println!(
-                                                    "Cannot add channel: maximum of {} channels reached",
-                                                    starling::roost::MAX_CHANNELS
-                                                );
-                                                None
-                                            } else if st.channels.contains(&channel) {
-                                                println!("Channel '{channel}' already exists");
-                                                None
-                                            } else if let Err(e) = store.channel_secret(&channel) {
-                                                // Mint the channel secret so the gossip task can
-                                                // subscribe immediately.
-                                                println!("Failed to mint channel secret: {e}");
-                                                None
-                                            } else {
-                                                st.channels.push(channel.clone());
-                                                match store.save_channels(&st.channels) {
-                                                    Ok(()) => Some(st.clone()),
-                                                    Err(e) => {
-                                                        println!("Failed to save channels: {e}");
-                                                        None
-                                                    }
-                                                }
-                                            }
-                                        };
-                                        let Some(snapshot) = snapshot else { continue };
-                                        let _ = console_state_tx.send(snapshot).await;
-                                        println!("Channel '{channel}' added");
-                                        starling::logger::info(&format!(
-                                            "roost '{name}': channel '{channel}' added"
-                                        ));
-                                    }
-                                    Some("remove") => {
-                                        let Some(channel) = parts.get(2) else {
-                                            println!("Usage: channel remove <name>");
-                                            continue;
-                                        };
-                                        let channel = channel.to_string();
-                                        if channel == "general" {
-                                            println!("Cannot remove the 'general' channel");
-                                            continue;
-                                        }
-                                        let snapshot = {
-                                            let mut st = state.lock().unwrap_or_else(|p| p.into_inner());
-                                            if !st.channels.contains(&channel) {
-                                                println!("Channel '{channel}' does not exist");
-                                                None
-                                            } else {
-                                                st.channels.retain(|c| c != &channel);
-                                                match store.save_channels(&st.channels) {
-                                                    Ok(()) => Some(st.clone()),
-                                                    Err(e) => {
-                                                        println!("Failed to save channels: {e}");
-                                                        None
-                                                    }
-                                                }
-                                            }
-                                        };
-                                        let Some(snapshot) = snapshot else { continue };
-                                        let _ = console_state_tx.send(snapshot).await;
-                                        println!("Channel '{channel}' removed");
-                                        starling::logger::info(&format!(
-                                            "roost '{name}': channel '{channel}' removed"
-                                        ));
-                                    }
-                                    _ => {
-                                        println!("Unknown channel command. Try 'channel add' or 'channel remove'.");
-                                    }
-                                }
-                            }
-                            _ => {
-                                println!("Unknown command: {line}");
-                                println!("Type 'help' for available commands.");
-                            }
+                    if handle_console_command(
+                        &line,
+                        name,
+                        silent,
+                        &state,
+                        &store,
+                        &code,
+                        &dir,
+                        &console_state_tx,
+                    )
+                    .await
+                    {
+                        store.db().flush()?;
+                        history_store.flush()?;
+                        return Ok(());
                     }
                 }
             }
@@ -671,29 +441,7 @@ pub async fn open(
                 match event {
                     Some(Ok(Event::NeighborUp(_))) => {
                         let snapshot = state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
-                        match postcard::to_stdvec(&snapshot) {
-                            Ok(blob) => {
-                                let encrypted = match ctl_crypto.try_encrypt(&blob) {
-                                    Ok(bytes) => bytes,
-                                    Err(e) => {
-                                        starling::logger::error(&format!(
-                                            "roost: control encrypt failed: {e}"
-                                        ));
-                                        continue;
-                                    }
-                                };
-                                if let Err(e) = ctl_tx.broadcast(encrypted.into()).await {
-                                    starling::logger::warn(&format!(
-                                        "roost: failed to broadcast state on control channel: {e}"
-                                    ));
-                                }
-                            }
-                            Err(e) => {
-                                starling::logger::error(&format!(
-                                    "roost: failed to serialise roost state: {e}"
-                                ));
-                            }
-                        }
+                        broadcast_state(&snapshot, &ctl_crypto, &ctl_tx).await;
                     }
                     Some(Ok(_)) => {}
                     Some(Err(e)) => {
@@ -709,138 +457,378 @@ pub async fn open(
             }
             snapshot = state_rx.recv() => {
                 if let Some(snapshot) = snapshot {
-                    if let Err(e) = update_history_membership(&history_store, &snapshot, roost_id) {
-                        starling::logger::warn(&format!(
-                            "roost: failed to update history membership after perm change: {e}"
-                        ));
-                    }
-                    // Spawn gossip subscriptions for channels added since
-                    // startup (e.g. via AddChannel moderation request), and
-                    // tear down subscriptions for channels that were removed
-                    // (e.g. via RemoveChannel moderation request).
-                    {
-                        let (new_channels, removed_channels): (Vec<String>, Vec<String>) = {
-                            let subscribed = subscribed_channels
-                                .lock()
-                                .unwrap_or_else(|poisoned| poisoned.into_inner());
-                            let added: Vec<String> = snapshot
-                                .channels
-                                .iter()
-                                .filter(|c| !subscribed.contains_key(*c))
-                                .cloned()
-                                .collect();
-                            let removed: Vec<String> = subscribed
-                                .keys()
-                                .filter(|c| !snapshot.channels.contains(c))
-                                .cloned()
-                                .collect();
-                            (added, removed)
-                        };
-                        // Tear down gossip tasks for removed channels.
-                        // Aborting the task drops the GossipReceiver, which —
-                        // together with the already-dropped GossipSender —
-                        // causes iroh-gossip to leave the topic.
-                        for chan in &removed_channels {
-                            if let Some(handle) = subscribed_channels
-                                .lock()
-                                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                                .remove(chan)
-                            {
-                                handle.abort();
-                            }
-                        }
-                        for chan in new_channels {
-                            let topic = topic_for(&format!("starling/roost/{code}/{chan}"));
-                            let secret = match store.channel_secret(&chan) {
-                                Ok(secret) => secret,
-                                Err(e) => {
-                                    starling::logger::error(&format!(
-                                        "roost: failed to load channel secret for '{chan}': {e}"
-                                    ));
-                                    continue;
-                                }
-                            };
-                            let crypto = FlockCrypto::from_secret(&secret);
-                            let (_sender, mut rx) = match gossip.subscribe(topic, vec![]).await {
-                                Ok(sub) => sub.split(),
-                                Err(e) => {
-                                    starling::logger::error(&format!(
-                                        "roost: subscribe failed for '{chan}': {e}"
-                                    ));
-                                    continue;
-                                }
-                            };
-                            let (st, ch) = (store.clone(), chan.clone());
-                            let chan_for_map = chan.clone();
-                            let handle = tokio::spawn(async move {
-                                while let Some(Ok(Event::Received(msg))) = rx.next().await {
-                                    match receive_payload(&crypto, &msg.content) {
-                                        Ok(Some(envelope)) => if let GossipPayload::Chat(m) = envelope.payload
-                                            && let Err(e) = st.append(&ch, &m)
-                                        {
-                                            starling::logger::error(&format!(
-                                                "roost: failed to persist message in '{ch}': {e}"
-                                            ));
-                                        },
-                                        Ok(None) => {
-                                            if let Some(plain) = crypto.decrypt(&msg.content)
-                                                && let Ok(GossipPayload::Chat(m)) =
-                                                    postcard::from_bytes::<GossipPayload>(&plain)
-                                            {
-                                                starling::logger::warn(&format!(
-                                                    "roost: persisting legacy unsigned chat from anonymous peer in '{ch}'"
-                                                ));
-                                                if let Err(e) = st.append(&ch, &m) {
-                                                    starling::logger::error(&format!(
-                                                        "roost: failed to persist message in '{ch}': {e}"
-                                                    ));
-                                                }
-                                            }
-                                        }
-                                        Err(e) => {
-                                            starling::logger::warn(&format!(
-                                                "roost: gossip frame rejected on channel '{ch}': {e}"
-                                            ));
-                                        }
-                                    }
-                                }
-                                starling::logger::warn(&format!(
-                                    "roost: gossip subscription ended for channel '{ch}'"
-                                ));
-                            });
-                            subscribed_channels
-                                .lock()
-                                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                                .insert(chan_for_map, handle);
-                        }
-                    }
-                    match postcard::to_stdvec(&snapshot) {
-                        Ok(blob) => {
-                            let encrypted = match ctl_crypto.try_encrypt(&blob) {
-                                Ok(bytes) => bytes,
-                                Err(e) => {
-                                    starling::logger::error(&format!(
-                                        "roost: control encrypt failed: {e}"
-                                    ));
-                                    continue;
-                                }
-                            };
-                            if let Err(e) = ctl_tx.broadcast(encrypted.into()).await {
-                                starling::logger::warn(&format!(
-                                    "roost: failed to broadcast state on control channel: {e}"
-                                ));
-                            }
-                        }
-                        Err(e) => {
-                            starling::logger::error(&format!(
-                                "roost: failed to serialise roost state: {e}"
-                            ));
-                        }
-                    }
+                    apply_state_update(
+                        snapshot,
+                        &history_store,
+                        roost_id,
+                        &gossip,
+                        &store,
+                        &code,
+                        &subscribed_channels,
+                        &ctl_crypto,
+                        &ctl_tx,
+                    )
+                    .await;
                 }
             }
         }
     }
+}
+
+/// Spawn (or re-spawn) the gossip receive loop for a single roost channel.
+///
+/// The channel secret is loaded from the store, the gossip topic is
+/// subscribed, and a task is spawned that authenticates and persists every
+/// received frame. The task's [`tokio::task::JoinHandle`] is recorded in
+/// `subscribed` so a later `RemoveChannel` can abort it and leave the topic.
+///
+/// Errors loading the secret or subscribing are logged and the helper returns
+/// without inserting a handle — the channel is simply not subscribed, mirroring
+/// the original `continue` behaviour in the inline loops.
+async fn spawn_channel_task(
+    gossip: &Gossip,
+    store: &Arc<Store>,
+    code: &str,
+    chan: &str,
+    subscribed: &Arc<std::sync::Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
+) {
+    let topic = topic_for(&format!("starling/roost/{code}/{chan}"));
+    let secret = match store.channel_secret(chan) {
+        Ok(secret) => secret,
+        Err(e) => {
+            starling::logger::error(&format!(
+                "roost: failed to load channel secret for '{chan}': {e}"
+            ));
+            return;
+        }
+    };
+    let crypto = FlockCrypto::from_secret(&secret);
+    let (_sender, mut rx) = match gossip.subscribe(topic, vec![]).await {
+        Ok(sub) => sub.split(),
+        Err(e) => {
+            starling::logger::error(&format!("roost: subscribe failed for '{chan}': {e}"));
+            return;
+        }
+    };
+    let (st, ch) = (store.clone(), chan.to_string());
+    let chan_for_map = chan.to_string();
+    let handle = tokio::spawn(async move {
+        while let Some(Ok(Event::Received(msg))) = rx.next().await {
+            // Phase 9: clients broadcast `postcard(Signed)` envelopes. We
+            // authenticate the signature before persisting so a forged
+            // `ChatMessage.author` attributed to another bird never lands
+            // in history. A legacy unsigned `GossipPayload` still decrypts
+            // (older peers); we persist those the legacy way to keep a V0
+            // roost that broadcasts during migration readable.
+            match receive_payload(&crypto, &msg.content) {
+                Ok(Some(envelope)) => {
+                    if let GossipPayload::Chat(m) = envelope.payload
+                        && let Err(e) = st.append(&ch, &m)
+                    {
+                        starling::logger::error(&format!(
+                            "roost: failed to persist message in '{ch}': {e}"
+                        ));
+                    }
+                }
+                Ok(None) => {
+                    if let Some(plain) = crypto.decrypt(&msg.content)
+                        && let Ok(GossipPayload::Chat(m)) =
+                            postcard::from_bytes::<GossipPayload>(&plain)
+                    {
+                        starling::logger::warn(&format!(
+                            "roost: persisting legacy unsigned chat from anonymous peer in '{ch}'"
+                        ));
+                        if let Err(e) = st.append(&ch, &m) {
+                            starling::logger::error(&format!(
+                                "roost: failed to persist message in '{ch}': {e}"
+                            ));
+                        }
+                    }
+                }
+                Err(e) => {
+                    starling::logger::warn(&format!(
+                        "roost: gossip frame rejected on channel '{ch}': {e}"
+                    ));
+                }
+            }
+        }
+        starling::logger::warn(&format!(
+            "roost: gossip subscription ended for channel '{ch}'"
+        ));
+    });
+    subscribed
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(chan_for_map, handle);
+}
+
+/// Serialise, encrypt, and broadcast the current [`RoostState`] on the control
+/// channel. Used by the heartbeat tick, the `NeighborUp` event, and the
+/// `state_rx` membership update. Failures are logged at the same severities as
+/// the original inline blocks (warn for broadcast, error for encrypt/serialise);
+/// the heartbeat variant previously prefixed messages with "heartbeat" —
+/// they now share the control-channel wording for consistency.
+async fn broadcast_state(snapshot: &RoostState, ctl_crypto: &FlockCrypto, ctl_tx: &GossipSender) {
+    let blob = match postcard::to_stdvec(snapshot) {
+        Ok(blob) => blob,
+        Err(e) => {
+            starling::logger::error(&format!("roost: failed to serialise roost state: {e}"));
+            return;
+        }
+    };
+    let encrypted = match ctl_crypto.try_encrypt(&blob) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            starling::logger::error(&format!("roost: control encrypt failed: {e}"));
+            return;
+        }
+    };
+    if let Err(e) = ctl_tx.broadcast(encrypted.into()).await {
+        starling::logger::warn(&format!(
+            "roost: failed to broadcast state on control channel: {e}"
+        ));
+    }
+}
+
+/// Handle one console command line. Returns `true` for `quit`/`exit`/`q` so the
+/// caller can flush the databases and shut down; any other input (including
+/// empty lines, which the caller filters out before calling) returns `false`.
+///
+/// The `continue` statements in the original inline match arms become early
+/// `return false`s here — control returns to the caller's `loop`, which keeps
+/// running, preserving the original behaviour.
+async fn handle_console_command(
+    line: &str,
+    name: &str,
+    silent: bool,
+    state: &Arc<Mutex<RoostState>>,
+    store: &Arc<Store>,
+    code: &str,
+    dir: &std::path::Path,
+    console_state_tx: &tokio::sync::mpsc::Sender<RoostState>,
+) -> bool {
+    let parts: Vec<&str> = line.split_whitespace().collect();
+    match parts.first().copied() {
+        Some("help") | Some("h") | Some("?") => {
+            println!("Available commands:");
+            println!("  status               — show roost info");
+            println!("  members              — list members");
+            println!("  invite               — show invite code");
+            println!("  channel add <name>   — add a channel");
+            println!("  channel remove <name> — remove a channel");
+            println!("  logs                 — show log file path");
+            println!("  quit | exit          — shut down the roost");
+            println!("  help                 — show this help");
+        }
+        Some("status") | Some("s") => {
+            let st = state.lock().unwrap_or_else(|p| p.into_inner());
+            println!("Roost: {name}");
+            println!("  invite code: {code}");
+            println!("  channels: {}", st.channels.join(", "));
+            println!("  members: {}", st.perms.members.len());
+            println!("  directory: {}", dir.display());
+            drop(st);
+            let db_size = store
+                .db()
+                .size_on_disk()
+                .map(|s| format!("{} bytes", s))
+                .unwrap_or_else(|_| "unknown".into());
+            println!("  db size: {db_size}");
+        }
+        Some("members") | Some("m") => {
+            let st = state.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some(owner) = &st.perms.owner {
+                println!(
+                    "  owner: {}",
+                    starling::logger::fingerprint(owner.as_bytes())
+                );
+            }
+            for member in st.perms.members.keys() {
+                println!(
+                    "  member: {}",
+                    starling::logger::fingerprint(member.as_bytes())
+                );
+            }
+            if !st.perms.bans.is_empty() {
+                println!("  bans ({}):", st.perms.bans.len());
+                for ban in &st.perms.bans {
+                    println!("    - {}", starling::logger::fingerprint(ban.as_bytes()));
+                }
+            }
+            if !st.perms.invited.is_empty() {
+                println!("  pending invites: {}", st.perms.invited.len());
+            }
+        }
+        Some("invite") | Some("i") => {
+            println!("{code}");
+        }
+        Some("logs") | Some("l") => {
+            if let Some(log_path) = starling::logger::path() {
+                println!("{}", log_path.display());
+            } else {
+                println!("Log file not available");
+            }
+        }
+        Some("quit") | Some("exit") | Some("q") => {
+            if !silent {
+                println!("Shutting down...");
+            }
+            starling::logger::info(&format!("roost '{name}': shutting down on console command"));
+            return true;
+        }
+        Some("channel") => {
+            match parts.get(1).copied() {
+                Some("add") => {
+                    let Some(channel) = parts.get(2) else {
+                        println!("Usage: channel add <name>");
+                        return false;
+                    };
+                    let channel = channel.to_string();
+                    if let Err(e) = store::validate_channel(&channel) {
+                        println!("Invalid channel name: {e}");
+                        return false;
+                    }
+                    let snapshot = {
+                        let mut st = state.lock().unwrap_or_else(|p| p.into_inner());
+                        if st.channels.len() >= starling::roost::MAX_CHANNELS {
+                            println!(
+                                "Cannot add channel: maximum of {} channels reached",
+                                starling::roost::MAX_CHANNELS
+                            );
+                            None
+                        } else if st.channels.contains(&channel) {
+                            println!("Channel '{channel}' already exists");
+                            None
+                        } else if let Err(e) = store.channel_secret(&channel) {
+                            // Mint the channel secret so the gossip task can
+                            // subscribe immediately.
+                            println!("Failed to mint channel secret: {e}");
+                            None
+                        } else {
+                            st.channels.push(channel.clone());
+                            match store.save_channels(&st.channels) {
+                                Ok(()) => Some(st.clone()),
+                                Err(e) => {
+                                    println!("Failed to save channels: {e}");
+                                    None
+                                }
+                            }
+                        }
+                    };
+                    let Some(snapshot) = snapshot else {
+                        return false;
+                    };
+                    let _ = console_state_tx.send(snapshot).await;
+                    println!("Channel '{channel}' added");
+                    starling::logger::info(&format!("roost '{name}': channel '{channel}' added"));
+                }
+                Some("remove") => {
+                    let Some(channel) = parts.get(2) else {
+                        println!("Usage: channel remove <name>");
+                        return false;
+                    };
+                    let channel = channel.to_string();
+                    if channel == "general" {
+                        println!("Cannot remove the 'general' channel");
+                        return false;
+                    }
+                    let snapshot = {
+                        let mut st = state.lock().unwrap_or_else(|p| p.into_inner());
+                        if !st.channels.contains(&channel) {
+                            println!("Channel '{channel}' does not exist");
+                            None
+                        } else {
+                            st.channels.retain(|c| c != &channel);
+                            match store.save_channels(&st.channels) {
+                                Ok(()) => Some(st.clone()),
+                                Err(e) => {
+                                    println!("Failed to save channels: {e}");
+                                    None
+                                }
+                            }
+                        }
+                    };
+                    let Some(snapshot) = snapshot else {
+                        return false;
+                    };
+                    let _ = console_state_tx.send(snapshot).await;
+                    println!("Channel '{channel}' removed");
+                    starling::logger::info(&format!("roost '{name}': channel '{channel}' removed"));
+                }
+                _ => {
+                    println!("Unknown channel command. Try 'channel add' or 'channel remove'.");
+                }
+            }
+        }
+        _ => {
+            println!("Unknown command: {line}");
+            println!("Type 'help' for available commands.");
+        }
+    }
+    false
+}
+
+/// Apply a [`RoostState`] update pushed by a moderation proto: refresh the
+/// history membership, spawn gossip tasks for newly added channels, abort tasks
+/// for removed channels, and rebroadcast the snapshot on the control channel.
+/// Replaces the inline `state_rx` arm body verbatim, with the duplicated spawn
+/// block delegated to [`spawn_channel_task`].
+async fn apply_state_update(
+    snapshot: RoostState,
+    history_store: &Arc<HistoryStore>,
+    roost_id: RoostId,
+    gossip: &Gossip,
+    store: &Arc<Store>,
+    code: &str,
+    subscribed_channels: &Arc<std::sync::Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
+    ctl_crypto: &FlockCrypto,
+    ctl_tx: &GossipSender,
+) {
+    if let Err(e) = update_history_membership(history_store, &snapshot, roost_id) {
+        starling::logger::warn(&format!(
+            "roost: failed to update history membership after perm change: {e}"
+        ));
+    }
+    // Spawn gossip subscriptions for channels added since
+    // startup (e.g. via AddChannel moderation request), and
+    // tear down subscriptions for channels that were removed
+    // (e.g. via RemoveChannel moderation request).
+    {
+        let (new_channels, removed_channels): (Vec<String>, Vec<String>) = {
+            let subscribed = subscribed_channels
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let added: Vec<String> = snapshot
+                .channels
+                .iter()
+                .filter(|c| !subscribed.contains_key(*c))
+                .cloned()
+                .collect();
+            let removed: Vec<String> = subscribed
+                .keys()
+                .filter(|c| !snapshot.channels.contains(c))
+                .cloned()
+                .collect();
+            (added, removed)
+        };
+        // Tear down gossip tasks for removed channels.
+        // Aborting the task drops the GossipReceiver, which —
+        // together with the already-dropped GossipSender —
+        // causes iroh-gossip to leave the topic.
+        for chan in &removed_channels {
+            if let Some(handle) = subscribed_channels
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(chan)
+            {
+                handle.abort();
+            }
+        }
+        for chan in new_channels {
+            spawn_channel_task(gossip, store, code, &chan, subscribed_channels).await;
+        }
+    }
+    broadcast_state(&snapshot, ctl_crypto, ctl_tx).await;
 }
 
 /// Request graceful shutdown of a running roost by reading its PID from the
@@ -1139,21 +1127,7 @@ fn doctor_readonly(name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn doctor(name: &str) -> anyhow::Result<()> {
-    validate_roost_name(name)?;
-    let dir = roost_data_dir(name);
-    if !dir.exists() {
-        anyhow::bail!("roost '{name}' not found at {}", dir.display());
-    }
-
-    if roost_lock_held(name) {
-        println!("⚠  roost '{name}' is currently running");
-        println!("   performing read-only checks only (no sled open)");
-        return doctor_readonly(name);
-    }
-
-    let mut issues = Vec::new();
-
+fn check_identity_key(name: &str, issues: &mut Vec<String>) -> anyhow::Result<()> {
     let key_path = roost_key_path(name);
     if key_path.exists() {
         let meta = key_path
@@ -1168,83 +1142,110 @@ pub fn doctor(name: &str) -> anyhow::Result<()> {
     } else {
         issues.push("identity key missing".into());
     }
+    Ok(())
+}
 
+fn check_database(name: &str, issues: &mut Vec<String>) {
     let db_path = roost_db_path(name);
-    if db_path.exists() {
-        match sled::open(&db_path) {
-            Ok(db) => {
-                // Verify each expected tree instead of just counting top-level
-                // entries. A corrupted tree may still open but will surface
-                // errors during iteration or schema verification.
-                for tree_name in ["events", "space_index", "session_heads", "heads", "schema"] {
-                    match db.open_tree(tree_name) {
-                        Ok(tree) => {
-                            // Full scan surfaces corruption in page/b-tree
-                            // structures that open_tree alone would miss.
-                            match tree.iter().collect::<Result<Vec<_>, _>>() {
-                                Ok(entries) => {
-                                    if tree_name == "schema" {
-                                        match tree.get(b"history") {
-                                            Ok(Some(version)) => {
-                                                if version.as_ref() != b"1" {
-                                                    issues.push(format!(
-                                                        "tree '{tree_name}': unsupported history schema version"
-                                                    ));
-                                                } else {
-                                                    println!(
-                                                        "  tree '{tree_name}': ✓ ({} entries, schema v1)",
-                                                        entries.len()
-                                                    );
-                                                }
-                                            }
-                                            Ok(None) => {
-                                                issues.push(format!(
-                                                    "tree '{tree_name}': missing history schema version"
-                                                ));
-                                            }
-                                            Err(e) => {
-                                                issues.push(format!(
-                                                    "tree '{tree_name}': schema read error: {e}"
-                                                ));
-                                            }
-                                        }
-                                    } else {
-                                        println!(
-                                            "  tree '{tree_name}': ✓ ({} entries)",
-                                            entries.len()
-                                        );
-                                    }
-                                }
-                                Err(e) => {
-                                    issues.push(format!(
-                                        "tree '{tree_name}': scan failed (corruption?): {e}"
-                                    ));
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            issues.push(format!("tree '{tree_name}': {e}"));
-                        }
-                    }
-                }
-                drop(db);
+    if !db_path.exists() {
+        issues.push("database file missing".into());
+        return;
+    }
+    match sled::open(&db_path) {
+        Ok(db) => {
+            // Verify each expected tree instead of just counting top-level
+            // entries. A corrupted tree may still open but will surface
+            // errors during iteration or schema verification.
+            for tree_name in ["events", "space_index", "session_heads", "heads", "schema"] {
+                check_tree(&db, tree_name, issues);
             }
-            Err(e) => {
-                issues.push(format!("database corrupt or unreadable: {e}"));
+            drop(db);
+        }
+        Err(e) => issues.push(format!("database corrupt or unreadable: {e}")),
+    }
+}
+
+// Verify a single sled tree: open it, full-scan every entry to surface
+// page/b-tree corruption that `open_tree` alone misses, and (for the schema
+// tree) confirm the recorded history schema version is one we support.
+//
+// Guard clauses flatten the original 5-deep nesting: each failure pushes a
+// diagnostic string and returns early, leaving the happy path at depth 1.
+fn check_tree(db: &sled::Db, tree_name: &str, issues: &mut Vec<String>) {
+    let tree = match db.open_tree(tree_name) {
+        Ok(t) => t,
+        Err(e) => {
+            issues.push(format!("tree '{tree_name}': {e}"));
+            return;
+        }
+    };
+    // Full scan surfaces corruption in page/b-tree structures that open_tree
+    // alone would miss.
+    let entries = match tree.iter().collect::<Result<Vec<_>, _>>() {
+        Ok(v) => v,
+        Err(e) => {
+            issues.push(format!(
+                "tree '{tree_name}': scan failed (corruption?): {e}"
+            ));
+            return;
+        }
+    };
+    if tree_name != "schema" {
+        println!("  tree '{tree_name}': ✓ ({} entries)", entries.len());
+        return;
+    }
+    match tree.get(b"history") {
+        Ok(Some(version)) => {
+            if version.as_ref() != b"1" {
+                issues.push(format!(
+                    "tree '{tree_name}': unsupported history schema version"
+                ));
+            } else {
+                println!(
+                    "  tree '{tree_name}': ✓ ({} entries, schema v1)",
+                    entries.len()
+                );
             }
         }
-    } else {
-        issues.push("database file missing".into());
+        Ok(None) => {
+            issues.push(format!(
+                "tree '{tree_name}': missing history schema version"
+            ));
+        }
+        Err(e) => {
+            issues.push(format!("tree '{tree_name}': schema read error: {e}"));
+        }
     }
+}
 
+fn report_issues(name: &str, issues: &[String]) {
     if issues.is_empty() {
         println!("✓ roost '{name}' looks healthy");
     } else {
         println!("✗ roost '{name}' has issues:");
-        for issue in &issues {
+        for issue in issues {
             println!("    - {issue}");
         }
     }
+}
+
+pub fn doctor(name: &str) -> anyhow::Result<()> {
+    validate_roost_name(name)?;
+    let dir = roost_data_dir(name);
+    if !dir.exists() {
+        anyhow::bail!("roost '{name}' not found at {}", dir.display());
+    }
+
+    if roost_lock_held(name) {
+        println!("⚠  roost '{name}' is currently running");
+        println!("   performing read-only checks only (no sled open)");
+        return doctor_readonly(name);
+    }
+
+    let mut issues = Vec::new();
+    check_identity_key(name, &mut issues)?;
+    check_database(name, &mut issues);
+    report_issues(name, &issues);
     Ok(())
 }
 
@@ -1413,63 +1414,7 @@ impl iroh::protocol::ProtocolHandler for ModProto {
                 .state
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            match req {
-                ModRequest::Ban(target) => {
-                    let r = st.perms.handle_ban(&from, &target);
-                    let ok = r.is_ok();
-                    (r.map_err(|e| e.to_string()), ok)
-                }
-                ModRequest::Kick(target) => {
-                    let r = st.perms.handle_kick(&from, &target);
-                    let ok = r.is_ok();
-                    (r.map_err(|e| e.to_string()), ok)
-                }
-                ModRequest::Invite(target) => {
-                    let r = st.perms.handle_invite(&from, target);
-                    let ok = r.is_ok();
-                    (r.map_err(|e| e.to_string()), ok)
-                }
-                ModRequest::DeleteMessage { channel, id } => {
-                    let allowed = st.perms.effective(&from).contains(Perm::MANAGE_MSGS);
-                    if !allowed {
-                        (Err("not allowed".into()), false)
-                    } else {
-                        match self.store.delete_message(&channel, &id) {
-                            Ok(true) => (Ok(()), false),
-                            Ok(false) => (Err("message not found".into()), false),
-                            Err(e) => (Err(e.to_string()), false),
-                        }
-                    }
-                }
-                ModRequest::AddChannel(ref name) => {
-                    let allowed = st.perms.effective(&from).contains(Perm::MANAGE_CHANS);
-                    if !allowed {
-                        (Err("not allowed".into()), false)
-                    } else if let Err(e) = store::validate_channel(name) {
-                        (Err(e.to_string()), false)
-                    } else if st.channels.iter().any(|c| c == name) {
-                        (Err("channel already exists".into()), false)
-                    } else if st.channels.len() >= starling::roost::MAX_CHANNELS {
-                        (Err("too many channels".into()), false)
-                    } else {
-                        st.channels.push(name.clone());
-                        (Ok(()), true)
-                    }
-                }
-                ModRequest::RemoveChannel(ref name) => {
-                    let allowed = st.perms.effective(&from).contains(Perm::MANAGE_CHANS);
-                    if !allowed {
-                        (Err("not allowed".into()), false)
-                    } else if name == "general" {
-                        (Err("cannot remove the general channel".into()), false)
-                    } else if let Some(pos) = st.channels.iter().position(|c| c == name) {
-                        st.channels.remove(pos);
-                        (Ok(()), true)
-                    } else {
-                        (Err("channel not found".into()), false)
-                    }
-                }
-            }
+            compute_verdict(&mut st, req, &from, &self.store)
         };
         if dirty {
             let snapshot = self.state.lock().unwrap().clone();
@@ -1490,6 +1435,95 @@ impl iroh::protocol::ProtocolHandler for ModProto {
         let _ = send.finish();
         conn.closed().await;
         Ok(())
+    }
+}
+
+/// Run a moderation request against the roost state and return `(verdict, dirty)`.
+/// `verdict` is `Ok(())` on success or `Err(message)` for the client; `dirty` is
+/// true only when a mutation should be persisted and rebroadcast on the control
+/// channel.
+///
+/// Splitting the per-arm logic into helpers flattens the `else if` ladders that
+/// pushed `accept` past the nesting limit; outcomes are identical to the
+/// original inline match.
+fn compute_verdict(
+    st: &mut RoostState,
+    req: ModRequest,
+    from: &iroh::EndpointId,
+    store: &Store,
+) -> (Result<(), String>, bool) {
+    match req {
+        ModRequest::Ban(target) => once(st.perms.handle_ban(from, &target)),
+        ModRequest::Kick(target) => once(st.perms.handle_kick(from, &target)),
+        ModRequest::Invite(target) => once(st.perms.handle_invite(from, target)),
+        ModRequest::DeleteMessage { channel, id } => delete_verdict(st, from, store, &channel, &id),
+        ModRequest::AddChannel(name) => add_channel_verdict(st, from, &name),
+        ModRequest::RemoveChannel(name) => remove_channel_verdict(st, from, &name),
+    }
+}
+
+/// Wrap a perms-handler result as the `(verdict, dirty)` pair the moderation
+/// protocol reports back to the client. `dirty` is true iff the handler
+/// succeeded (i.e. the membership actually changed). Shared by ban/kick/invite.
+fn once(r: anyhow::Result<()>) -> (Result<(), String>, bool) {
+    let ok = r.is_ok();
+    (r.map_err(|e| e.to_string()), ok)
+}
+
+fn delete_verdict(
+    st: &RoostState,
+    from: &iroh::EndpointId,
+    store: &Store,
+    channel: &str,
+    id: &str,
+) -> (Result<(), String>, bool) {
+    if !st.perms.effective(from).contains(Perm::MANAGE_MSGS) {
+        return (Err("not allowed".into()), false);
+    }
+    match store.delete_message(channel, id) {
+        Ok(true) => (Ok(()), false),
+        Ok(false) => (Err("message not found".into()), false),
+        Err(e) => (Err(e.to_string()), false),
+    }
+}
+
+fn add_channel_verdict(
+    st: &mut RoostState,
+    from: &iroh::EndpointId,
+    name: &str,
+) -> (Result<(), String>, bool) {
+    if !st.perms.effective(from).contains(Perm::MANAGE_CHANS) {
+        return (Err("not allowed".into()), false);
+    }
+    if let Err(e) = store::validate_channel(name) {
+        return (Err(e.to_string()), false);
+    }
+    if st.channels.iter().any(|c| c == name) {
+        return (Err("channel already exists".into()), false);
+    }
+    if st.channels.len() >= starling::roost::MAX_CHANNELS {
+        return (Err("too many channels".into()), false);
+    }
+    st.channels.push(name.to_string());
+    (Ok(()), true)
+}
+
+fn remove_channel_verdict(
+    st: &mut RoostState,
+    from: &iroh::EndpointId,
+    name: &str,
+) -> (Result<(), String>, bool) {
+    if !st.perms.effective(from).contains(Perm::MANAGE_CHANS) {
+        return (Err("not allowed".into()), false);
+    }
+    if name == "general" {
+        return (Err("cannot remove the general channel".into()), false);
+    }
+    if let Some(pos) = st.channels.iter().position(|c| c == name) {
+        st.channels.remove(pos);
+        (Ok(()), true)
+    } else {
+        (Err("channel not found".into()), false)
     }
 }
 
