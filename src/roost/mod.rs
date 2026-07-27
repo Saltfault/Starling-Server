@@ -314,6 +314,7 @@ pub async fn open(
         membership.authorized_at(&remote, membership.revision(), membership.key_epoch())
     });
     let (state_tx, mut state_rx) = mpsc::channel::<RoostState>(32);
+    let console_state_tx = state_tx.clone();
     let _router = Router::builder(endpoint.clone())
         .accept(GOSSIP_ALPN, gossip.clone())
         .accept(HISTORY_V1_ALPN, history)
@@ -474,12 +475,14 @@ pub async fn open(
                     match parts.first().copied() {
                             Some("help") | Some("h") | Some("?") => {
                                 println!("Available commands:");
-                                println!("  status       — show roost info");
-                                println!("  members      — list members");
-                                println!("  invite       — show invite code");
-                                println!("  logs         — show log file path");
-                                println!("  quit | exit  — shut down the roost");
-                                println!("  help         — show this help");
+                                println!("  status               — show roost info");
+                                println!("  members              — list members");
+                                println!("  invite               — show invite code");
+                                println!("  channel add <name>   — add a channel");
+                                println!("  channel remove <name> — remove a channel");
+                                println!("  logs                 — show log file path");
+                                println!("  quit | exit          — shut down the roost");
+                                println!("  help                 — show this help");
                             }
                             Some("status") | Some("s") => {
                                 let st = state.lock().unwrap_or_else(|p| p.into_inner());
@@ -540,6 +543,88 @@ pub async fn open(
                                 store.db().flush()?;
                                 history_store.flush()?;
                                 return Ok(());
+                            }
+                            Some("channel") => {
+                                match parts.get(1).copied() {
+                                    Some("add") => {
+                                        let Some(channel) = parts.get(2) else {
+                                            println!("Usage: channel add <name>");
+                                            continue;
+                                        };
+                                        let channel = channel.to_string();
+                                        if let Err(e) = store::validate_channel(&channel) {
+                                            println!("Invalid channel name: {e}");
+                                            continue;
+                                        }
+                                        let mut st = state.lock().unwrap_or_else(|p| p.into_inner());
+                                        if st.channels.len() >= starling::roost::MAX_CHANNELS {
+                                            println!(
+                                                "Cannot add channel: maximum of {} channels reached",
+                                                starling::roost::MAX_CHANNELS
+                                            );
+                                            drop(st);
+                                            continue;
+                                        }
+                                        if st.channels.contains(&channel) {
+                                            println!("Channel '{channel}' already exists");
+                                            drop(st);
+                                            continue;
+                                        }
+                                        // Mint the channel secret so the gossip task can
+                                        // subscribe immediately.
+                                        if let Err(e) = store.channel_secret(&channel) {
+                                            println!("Failed to mint channel secret: {e}");
+                                            drop(st);
+                                            continue;
+                                        }
+                                        st.channels.push(channel.clone());
+                                        if let Err(e) = store.save_channels(&st.channels) {
+                                            println!("Failed to save channels: {e}");
+                                            drop(st);
+                                            continue;
+                                        }
+                                        let snapshot = st.clone();
+                                        drop(st);
+                                        let _ = console_state_tx.send(snapshot).await;
+                                        println!("Channel '{channel}' added");
+                                        starling::logger::info(&format!(
+                                            "roost '{name}': channel '{channel}' added"
+                                        ));
+                                    }
+                                    Some("remove") => {
+                                        let Some(channel) = parts.get(2) else {
+                                            println!("Usage: channel remove <name>");
+                                            continue;
+                                        };
+                                        let channel = channel.to_string();
+                                        if channel == "general" {
+                                            println!("Cannot remove the 'general' channel");
+                                            continue;
+                                        }
+                                        let mut st = state.lock().unwrap_or_else(|p| p.into_inner());
+                                        if !st.channels.contains(&channel) {
+                                            println!("Channel '{channel}' does not exist");
+                                            drop(st);
+                                            continue;
+                                        }
+                                        st.channels.retain(|c| c != &channel);
+                                        if let Err(e) = store.save_channels(&st.channels) {
+                                            println!("Failed to save channels: {e}");
+                                            drop(st);
+                                            continue;
+                                        }
+                                        let snapshot = st.clone();
+                                        drop(st);
+                                        let _ = console_state_tx.send(snapshot).await;
+                                        println!("Channel '{channel}' removed");
+                                        starling::logger::info(&format!(
+                                            "roost '{name}': channel '{channel}' removed"
+                                        ));
+                                    }
+                                    _ => {
+                                        println!("Unknown channel command. Try 'channel add' or 'channel remove'.");
+                                    }
+                                }
                             }
                             _ => {
                                 println!("Unknown command: {line}");
