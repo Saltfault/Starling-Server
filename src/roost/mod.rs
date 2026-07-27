@@ -597,6 +597,7 @@ async fn broadcast_state(snapshot: &RoostState, ctl_crypto: &FlockCrypto, ctl_tx
 /// The `continue` statements in the original inline match arms become early
 /// `return false`s here — control returns to the caller's `loop`, which keeps
 /// running, preserving the original behaviour.
+#[allow(clippy::too_many_arguments)]
 async fn handle_console_command(
     line: &str,
     name: &str,
@@ -773,6 +774,7 @@ async fn handle_console_command(
 /// for removed channels, and rebroadcast the snapshot on the control channel.
 /// Replaces the inline `state_rx` arm body verbatim, with the duplicated spawn
 /// block delegated to [`spawn_channel_task`].
+#[allow(clippy::too_many_arguments)]
 async fn apply_state_update(
     snapshot: RoostState,
     history_store: &Arc<HistoryStore>,
