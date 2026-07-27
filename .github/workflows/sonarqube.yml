@@ -1,11 +1,9 @@
 name: SonarQube
-
 on:
   push:
     branches: [main, master, develop]
   pull_request:
     branches: [main, master, develop]
-
 jobs:
   sonarqube:
     runs-on: ubuntu-latest
@@ -20,4 +18,5 @@ jobs:
           SONAR_HOST_URL: https://sonarqube.hearthhome.lol
         with:
           args: >
-            -Dsonar.projectKey=Saltfault_Starling-Server
+            -Dsonar.projectKey=Saltfault_Starling-Server_f78bc134-d93a-445c-b685-cff747a8353e
+
