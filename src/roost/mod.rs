@@ -268,14 +268,6 @@ pub async fn open(
         starling::logger::error(&format!("endpoint bind failed for roost '{name}': {e}"));
         e
     })?;
-    if tokio::time::timeout(std::time::Duration::from_secs(10), endpoint.online())
-        .await
-        .is_err()
-    {
-        starling::logger::warn(&format!(
-            "roost '{name}': not reachable yet (starting degraded)"
-        ));
-    }
 
     let my_id = endpoint.addr().id;
     // SAFETY: owner MUST be set before Router::spawn() below
@@ -341,6 +333,18 @@ pub async fn open(
             },
         )
         .spawn();
+
+    // Check relay reachability AFTER the Router is registered so local
+    // connections (which don't need the relay) work immediately even when
+    // the relay is slow or unreachable.
+    if tokio::time::timeout(std::time::Duration::from_secs(10), endpoint.online())
+        .await
+        .is_err()
+    {
+        starling::logger::warn(&format!(
+            "roost '{name}': not reachable yet (starting degraded)"
+        ));
+    }
 
     // The channel list is captured once at startup, but the subscription
     // tasks must also be spawned for channels added at runtime. We track
