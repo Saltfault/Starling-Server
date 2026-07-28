@@ -531,7 +531,10 @@ async fn spawn_channel_task(
         }
     };
     let crypto = FlockCrypto::from_secret(&secret);
-    let (_sender, mut rx) = match gossip.subscribe(topic, vec![]).await {
+    // Keep the sender alive so the roost remains a full mesh participant.
+    // Dropping it would make the subscription receive-only, preventing the
+    // roost from relaying NeighborUp events between clients.
+    let (sender, mut rx) = match gossip.subscribe(topic, vec![]).await {
         Ok(sub) => sub.split(),
         Err(e) => {
             starling::logger::error(&format!("roost: subscribe failed for '{chan}': {e}"));
@@ -541,6 +544,8 @@ async fn spawn_channel_task(
     let (st, ch) = (store.clone(), chan.to_string());
     let chan_for_map = chan.to_string();
     let handle = tokio::spawn(async move {
+        // Bind sender to keep the subscription alive as a full participant.
+        let _sender = sender;
         while let Some(Ok(Event::Received(msg))) = rx.next().await {
             // Phase 9: clients broadcast `postcard(Signed)` envelopes. We
             // authenticate the signature before persisting so a forged
@@ -550,12 +555,18 @@ async fn spawn_channel_task(
             // roost that broadcasts during migration readable.
             match receive_payload(&crypto, &msg.content) {
                 Ok(Some(envelope)) => {
-                    if let GossipPayload::Chat(m) = envelope.payload
-                        && let Err(e) = st.append(&ch, &m)
-                    {
-                        starling::logger::error(&format!(
-                            "roost: failed to persist message in '{ch}': {e}"
+                    if let GossipPayload::Chat(m) = envelope.payload {
+                        starling::logger::info(&format!(
+                            "roost: #{} message from {}: {}",
+                            ch,
+                            m.author,
+                            &m.body[..m.body.len().min(80)]
                         ));
+                        if let Err(e) = st.append(&ch, &m) {
+                            starling::logger::error(&format!(
+                                "roost: failed to persist message in '{ch}': {e}"
+                            ));
+                        }
                     }
                 }
                 Ok(None) => {
