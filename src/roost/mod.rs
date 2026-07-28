@@ -757,14 +757,13 @@ async fn handle_console_command(
                         return false;
                     };
                     let channel = channel.to_string();
-                    if channel == "general" {
-                        println!("Cannot remove the 'general' channel");
-                        return false;
-                    }
                     let snapshot = {
                         let mut st = state.lock().unwrap_or_else(|p| p.into_inner());
                         if !st.channels.contains(&channel) {
                             println!("Channel '{channel}' does not exist");
+                            None
+                        } else if st.channels.len() == 1 {
+                            println!("Cannot remove the only remaining channel");
                             None
                         } else {
                             st.channels.retain(|c| c != &channel);
@@ -1072,14 +1071,14 @@ pub fn remove_channel(name: &str, channel: &str) -> anyhow::Result<()> {
     if roost_lock_held(name) {
         anyhow::bail!("roost '{name}' is running; stop it first or use the moderation protocol");
     }
-    if channel == "general" {
-        anyhow::bail!("cannot remove the 'general' channel");
-    }
     let db_path = roost_db_path(name);
     let store = Store::open(&db_path)?;
     let mut channels = store
         .load_channels()?
         .unwrap_or_else(|| vec!["general".into()]);
+    if channels.len() == 1 {
+        anyhow::bail!("cannot remove the only remaining channel");
+    }
     let pos = channels
         .iter()
         .position(|c| c == channel)
@@ -1546,8 +1545,11 @@ fn remove_channel_verdict(
     if !st.perms.effective(from).contains(Perm::MANAGE_CHANS) {
         return (Err("not allowed".into()), false);
     }
-    if name == "general" {
-        return (Err("cannot remove the general channel".into()), false);
+    if st.channels.len() == 1 {
+        return (
+            Err("cannot remove the only remaining channel".into()),
+            false,
+        );
     }
     if let Some(pos) = st.channels.iter().position(|c| c == name) {
         st.channels.remove(pos);
