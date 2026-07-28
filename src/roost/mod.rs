@@ -320,6 +320,24 @@ pub async fn open(
         )
         .spawn();
 
+    // DIAGNOSTIC: confirm which ALPNs the endpoint is advertising. If a join
+    // still fails with QUIC error 120, this lets us verify the server side
+    // rather than guessing.
+    println!(
+        "roost '{name}' router active on {my_id}; registered ALPNs: {}",
+        [
+            GOSSIP_ALPN,
+            HISTORY_V1_ALPN,
+            ROOST_SYNC_ALPN,
+            MOD_ALPN,
+            JOIN_ALPN
+        ]
+        .iter()
+        .map(|a| String::from_utf8_lossy(a).to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+    );
+
     let roost_id = RoostId(*my_id.as_bytes());
     {
         let st = state
@@ -1557,6 +1575,7 @@ impl iroh::protocol::ProtocolHandler for JoinProto {
         conn: iroh::endpoint::Connection,
     ) -> Result<(), iroh::protocol::AcceptError> {
         let who = conn.remote_id();
+        starling::logger::info(&format!("roost-join: incoming connection from {who}"));
         let Ok(Ok(mut send)) = tokio::time::timeout(IO_TIMEOUT, conn.open_uni()).await else {
             return Ok(());
         };
