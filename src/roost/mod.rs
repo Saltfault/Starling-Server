@@ -281,26 +281,12 @@ pub async fn open(
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         st.perms.owner = Some(my_id);
     }
-    let roost_id = RoostId(*my_id.as_bytes());
-    {
-        let st = state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Err(e) = update_history_membership(&history_store, &st, roost_id) {
-            starling::logger::warn(&format!(
-                "roost '{name}': failed to inject initial history membership: {e}"
-            ));
-        }
-    }
-    let code = encode_roost_code(&my_id);
-    println!("✓ roost '{name}' is online");
-    println!("  code: {code}");
-    println!("  join: starling join {code}");
-    starling::logger::info(&format!(
-        "roost '{name}' online, invite fingerprint {}",
-        starling::logger::fingerprint(code.as_bytes())
-    ));
 
+    // Spawn the Router as early as possible after the endpoint is bound so
+    // that ALPNs are advertised immediately.  Any peer connecting between
+    // bind and Router::spawn gets "peer doesn't support any known protocol"
+    // (QUIC error 120) because the endpoint accepts the connection but has
+    // no protocols registered yet.
     let gossip = Gossip::builder().spawn(endpoint.clone());
     let history = HistoryProto::new(history_store.clone(), |remote, _request, membership| {
         membership.authorized_at(&remote, membership.revision(), membership.key_epoch())
@@ -333,6 +319,26 @@ pub async fn open(
             },
         )
         .spawn();
+
+    let roost_id = RoostId(*my_id.as_bytes());
+    {
+        let st = state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Err(e) = update_history_membership(&history_store, &st, roost_id) {
+            starling::logger::warn(&format!(
+                "roost '{name}': failed to inject initial history membership: {e}"
+            ));
+        }
+    }
+    let code = encode_roost_code(&my_id);
+    println!("✓ roost '{name}' is online");
+    println!("  code: {code}");
+    println!("  join: starling join {code}");
+    starling::logger::info(&format!(
+        "roost '{name}' online, invite fingerprint {}",
+        starling::logger::fingerprint(code.as_bytes())
+    ));
 
     // Check relay reachability AFTER the Router is registered so local
     // connections (which don't need the relay) work immediately even when
