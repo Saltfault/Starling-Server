@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Starling Server installer — Linux / macOS
 # Usage:
-#   curl -sSfL https://forgejo.hearthhome.lol/Saltfault/Starling-Server/releases/download/v<VERSION>/install.sh | bash
+#   curl -sSfL https://forgejo.hearthhome.lol/Saltfault/Starling-Server/raw/branch/main/install.sh | bash
 
 set -euo pipefail
 

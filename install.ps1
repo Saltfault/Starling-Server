@@ -1,6 +1,6 @@
 # Starling Server installer — Windows (PowerShell)
 # Usage:
-#   irm https://forgejo.hearthhome.lol/Saltfault/Starling-Server/releases/download/v<VERSION>/install.ps1 | iex
+#   irm https://forgejo.hearthhome.lol/Saltfault/Starling-Server/raw/branch/main/install.ps1 | iex
 
 param(
     [string]$Version = "latest",
