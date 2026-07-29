@@ -388,7 +388,17 @@ pub async fn open(
         Arc::new(std::sync::Mutex::new(HashMap::new()));
     let roost_secret = iroh::SecretKey::from_bytes(&key_bytes);
     for chan in &startup_channels {
-        spawn_channel_task(&gossip, &store, &code, chan, &subscribed_channels, name, my_id, roost_secret.clone()).await;
+        spawn_channel_task(
+            &gossip,
+            &store,
+            &code,
+            chan,
+            &subscribed_channels,
+            name,
+            my_id,
+            roost_secret.clone(),
+        )
+        .await;
     }
 
     let control_key = format!("{code}/_control");
@@ -517,6 +527,7 @@ pub async fn open(
 /// Errors loading the secret or subscribing are logged and the helper returns
 /// without inserting a handle — the channel is simply not subscribed, mirroring
 /// the original `continue` behaviour in the inline loops.
+#[allow(clippy::too_many_arguments)]
 async fn spawn_channel_task(
     gossip: &Gossip,
     store: &Arc<Store>,
@@ -554,45 +565,43 @@ async fn spawn_channel_task(
     let handle = tokio::spawn(async move {
         while let Some(event) = rx.next().await {
             match event {
-                Ok(Event::Received(msg)) => {
-                    match receive_payload(&crypto, &msg.content) {
-                        Ok(Some(envelope)) => {
-                            if let GossipPayload::Chat(m) = envelope.payload {
-                                starling::logger::info(&format!(
-                                    "roost: #{} message from {}: {}",
-                                    ch,
-                                    m.author,
-                                    &m.body[..m.body.len().min(80)]
-                                ));
-                                if let Err(e) = st.append(&ch, &m) {
-                                    starling::logger::error(&format!(
-                                        "roost: failed to persist message in '{ch}': {e}"
-                                    ));
-                                }
-                            }
-                        }
-                        Ok(None) => {
-                            if let Some(plain) = crypto.decrypt(&msg.content)
-                                && let Ok(GossipPayload::Chat(m)) =
-                                    postcard::from_bytes::<GossipPayload>(&plain)
-                            {
-                                starling::logger::warn(&format!(
-                                    "roost: persisting legacy unsigned chat from anonymous peer in '{ch}'"
-                                ));
-                                if let Err(e) = st.append(&ch, &m) {
-                                    starling::logger::error(&format!(
-                                        "roost: failed to persist message in '{ch}': {e}"
-                                    ));
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            starling::logger::warn(&format!(
-                                "roost: gossip frame rejected on channel '{ch}': {e}"
+                Ok(Event::Received(msg)) => match receive_payload(&crypto, &msg.content) {
+                    Ok(Some(envelope)) => {
+                        if let GossipPayload::Chat(m) = envelope.payload {
+                            starling::logger::info(&format!(
+                                "roost: #{} message from {}: {}",
+                                ch,
+                                m.author,
+                                &m.body[..m.body.len().min(80)]
                             ));
+                            if let Err(e) = st.append(&ch, &m) {
+                                starling::logger::error(&format!(
+                                    "roost: failed to persist message in '{ch}': {e}"
+                                ));
+                            }
                         }
                     }
-                }
+                    Ok(None) => {
+                        if let Some(plain) = crypto.decrypt(&msg.content)
+                            && let Ok(GossipPayload::Chat(m)) =
+                                postcard::from_bytes::<GossipPayload>(&plain)
+                        {
+                            starling::logger::warn(&format!(
+                                "roost: persisting legacy unsigned chat from anonymous peer in '{ch}'"
+                            ));
+                            if let Err(e) = st.append(&ch, &m) {
+                                starling::logger::error(&format!(
+                                    "roost: failed to persist message in '{ch}': {e}"
+                                ));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        starling::logger::warn(&format!(
+                            "roost: gossip frame rejected on channel '{ch}': {e}"
+                        ));
+                    }
+                },
                 Ok(Event::NeighborUp(_)) => {
                     let payload = GossipPayload::Profile {
                         id: my_id,
@@ -610,9 +619,7 @@ async fn spawn_channel_task(
                 }
                 Ok(_) => {}
                 Err(e) => {
-                    starling::logger::warn(&format!(
-                        "roost: gossip error on channel '{ch}': {e}"
-                    ));
+                    starling::logger::warn(&format!("roost: gossip error on channel '{ch}': {e}"));
                 }
             }
         }
@@ -893,7 +900,17 @@ async fn apply_state_update(
             }
         }
         for chan in new_channels {
-            spawn_channel_task(gossip, store, code, &chan, subscribed_channels, name, my_id, secret.clone()).await;
+            spawn_channel_task(
+                gossip,
+                store,
+                code,
+                &chan,
+                subscribed_channels,
+                name,
+                my_id,
+                secret.clone(),
+            )
+            .await;
         }
     }
     broadcast_state(&snapshot, ctl_crypto, ctl_tx).await;
