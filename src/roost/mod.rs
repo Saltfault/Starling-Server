@@ -4,7 +4,7 @@ pub mod store;
 
 use history_proto::HistoryProto;
 use history_store::HistoryStore;
-use iroh::{Endpoint, RelayMode, RelayUrl, endpoint::presets, protocol::Router};
+use iroh::{Endpoint, EndpointId, RelayMode, RelayUrl, endpoint::presets, protocol::Router};
 use iroh_gossip::api::{Event, GossipSender};
 use iroh_gossip::net::{GOSSIP_ALPN, Gossip};
 use n0_future::StreamExt;
@@ -386,8 +386,9 @@ pub async fn open(
         .clone();
     let subscribed_channels: Arc<std::sync::Mutex<HashMap<String, tokio::task::JoinHandle<()>>>> =
         Arc::new(std::sync::Mutex::new(HashMap::new()));
+    let roost_secret = iroh::SecretKey::from_bytes(&key_bytes);
     for chan in &startup_channels {
-        spawn_channel_task(&gossip, &store, &code, chan, &subscribed_channels).await;
+        spawn_channel_task(&gossip, &store, &code, chan, &subscribed_channels, name, my_id, roost_secret.clone()).await;
     }
 
     let control_key = format!("{code}/_control");
@@ -495,6 +496,9 @@ pub async fn open(
                         &subscribed_channels,
                         &ctl_crypto,
                         &ctl_tx,
+                        name,
+                        my_id,
+                        roost_secret.clone(),
                     )
                     .await;
                 }
@@ -519,6 +523,9 @@ async fn spawn_channel_task(
     code: &str,
     chan: &str,
     subscribed: &Arc<std::sync::Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
+    name: &str,
+    my_id: EndpointId,
+    identity_secret: iroh::SecretKey,
 ) {
     let topic = topic_for(&format!("starling/roost/{code}/{chan}"));
     let secret = match store.channel_secret(chan) {
@@ -543,50 +550,68 @@ async fn spawn_channel_task(
     };
     let (st, ch) = (store.clone(), chan.to_string());
     let chan_for_map = chan.to_string();
+    let roost_name = name.to_string();
     let handle = tokio::spawn(async move {
-        // Bind sender to keep the subscription alive as a full participant.
-        let _sender = sender;
-        while let Some(Ok(Event::Received(msg))) = rx.next().await {
-            // Phase 9: clients broadcast `postcard(Signed)` envelopes. We
-            // authenticate the signature before persisting so a forged
-            // `ChatMessage.author` attributed to another bird never lands
-            // in history. A legacy unsigned `GossipPayload` still decrypts
-            // (older peers); we persist those the legacy way to keep a V0
-            // roost that broadcasts during migration readable.
-            match receive_payload(&crypto, &msg.content) {
-                Ok(Some(envelope)) => {
-                    if let GossipPayload::Chat(m) = envelope.payload {
-                        starling::logger::info(&format!(
-                            "roost: #{} message from {}: {}",
-                            ch,
-                            m.author,
-                            &m.body[..m.body.len().min(80)]
-                        ));
-                        if let Err(e) = st.append(&ch, &m) {
-                            starling::logger::error(&format!(
-                                "roost: failed to persist message in '{ch}': {e}"
+        while let Some(event) = rx.next().await {
+            match event {
+                Ok(Event::Received(msg)) => {
+                    match receive_payload(&crypto, &msg.content) {
+                        Ok(Some(envelope)) => {
+                            if let GossipPayload::Chat(m) = envelope.payload {
+                                starling::logger::info(&format!(
+                                    "roost: #{} message from {}: {}",
+                                    ch,
+                                    m.author,
+                                    &m.body[..m.body.len().min(80)]
+                                ));
+                                if let Err(e) = st.append(&ch, &m) {
+                                    starling::logger::error(&format!(
+                                        "roost: failed to persist message in '{ch}': {e}"
+                                    ));
+                                }
+                            }
+                        }
+                        Ok(None) => {
+                            if let Some(plain) = crypto.decrypt(&msg.content)
+                                && let Ok(GossipPayload::Chat(m)) =
+                                    postcard::from_bytes::<GossipPayload>(&plain)
+                            {
+                                starling::logger::warn(&format!(
+                                    "roost: persisting legacy unsigned chat from anonymous peer in '{ch}'"
+                                ));
+                                if let Err(e) = st.append(&ch, &m) {
+                                    starling::logger::error(&format!(
+                                        "roost: failed to persist message in '{ch}': {e}"
+                                    ));
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            starling::logger::warn(&format!(
+                                "roost: gossip frame rejected on channel '{ch}': {e}"
                             ));
                         }
                     }
                 }
-                Ok(None) => {
-                    if let Some(plain) = crypto.decrypt(&msg.content)
-                        && let Ok(GossipPayload::Chat(m)) =
-                            postcard::from_bytes::<GossipPayload>(&plain)
-                    {
-                        starling::logger::warn(&format!(
-                            "roost: persisting legacy unsigned chat from anonymous peer in '{ch}'"
-                        ));
-                        if let Err(e) = st.append(&ch, &m) {
-                            starling::logger::error(&format!(
-                                "roost: failed to persist message in '{ch}': {e}"
-                            ));
-                        }
-                    }
+                Ok(Event::NeighborUp(_)) => {
+                    let payload = GossipPayload::Profile {
+                        id: my_id,
+                        name: roost_name.clone(),
+                        dm_pk: Vec::new(),
+                        pronouns: String::new(),
+                    };
+                    let _ = starling::net::broadcast_payload(
+                        &sender,
+                        &crypto,
+                        &identity_secret,
+                        &payload,
+                    )
+                    .await;
                 }
+                Ok(_) => {}
                 Err(e) => {
                     starling::logger::warn(&format!(
-                        "roost: gossip frame rejected on channel '{ch}': {e}"
+                        "roost: gossip error on channel '{ch}': {e}"
                     ));
                 }
             }
@@ -823,6 +848,9 @@ async fn apply_state_update(
     subscribed_channels: &Arc<std::sync::Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
     ctl_crypto: &FlockCrypto,
     ctl_tx: &GossipSender,
+    name: &str,
+    my_id: EndpointId,
+    secret: iroh::SecretKey,
 ) {
     if let Err(e) = update_history_membership(history_store, &snapshot, roost_id) {
         starling::logger::warn(&format!(
@@ -865,7 +893,7 @@ async fn apply_state_update(
             }
         }
         for chan in new_channels {
-            spawn_channel_task(gossip, store, code, &chan, subscribed_channels).await;
+            spawn_channel_task(gossip, store, code, &chan, subscribed_channels, name, my_id, secret.clone()).await;
         }
     }
     broadcast_state(&snapshot, ctl_crypto, ctl_tx).await;
