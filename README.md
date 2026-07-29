@@ -16,7 +16,12 @@ Each roost lives under `~/.config/starling/roosts/<name>/` (Unix) or `%APPDATA%/
 
 ## Install
 
-Download the prebuilt binary — no Rust or compiler needed:
+**Recommended:** install the [`starling` launcher](https://forgejo.hearthhome.lol/Saltfault/Starling#install), then:
+```bash
+starling install server
+```
+
+Or install standalone — no Rust or compiler needed:
 
 **Windows (PowerShell):**
 ```powershell
@@ -29,9 +34,7 @@ curl -sSfL https://forgejo.hearthhome.lol/Saltfault/Starling-Server/releases/lat
 ```
 
 The installer places `starling-server` in your PATH.
-Upgrade: re-run the same command. Uninstall: `install.sh --uninstall` or `install.ps1 -Uninstall`.
-
-> **Building from source?** You need Rust and a C compiler. See the [platform setup in the TUI README](https://forgejo.hearthhome.lol/Saltfault/Starling-TUI#platform-setup).
+Upgrade: re-run the same command, or `starling update server`. Uninstall: `install.sh --uninstall`.
 
 ## Quick start
 
