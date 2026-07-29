@@ -130,7 +130,6 @@ jobs:
             cp "target/$target/release/starling-server$ext" "starling-server-$target$ext"
             sha256sum "starling-server-$target$ext" > "starling-server-$target.sha256"
           done
-          cp install.sh install.ps1 .
 
       - name: Download macOS from GitHub Release
         env:
