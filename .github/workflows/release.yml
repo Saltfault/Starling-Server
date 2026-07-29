@@ -88,11 +88,19 @@ jobs:
           ext=""
           [[ "${{ matrix.target }}" == *-windows-* ]] && ext=".exe"
           cp "target/${{ matrix.target }}/release/starling-server$ext" "starling-server-${{ matrix.target }}$ext"
+          sha256sum "starling-server-${{ matrix.target }}$ext" > "starling-server-${{ matrix.target }}.sha256"
       - name: Upload binary
         uses: actions/upload-artifact@v7
         with:
           name: starling-server-${{ matrix.target }}
           path: starling-server-${{ matrix.target }}*
+      - name: Upload install scripts
+        uses: actions/upload-artifact@v7
+        with:
+          name: install-scripts
+          path: |
+            install.sh
+            install.ps1
 
   release:
     needs: [detect, build]
@@ -109,14 +117,28 @@ jobs:
           tag_name: v${{ needs.detect.outputs.version }}
           files: artifacts/**/*
           body: |
-            ## Which download?
+            ## Quick install
 
-            - Windows (most PCs) ........... `starling-server-x86_64-pc-windows-gnu.exe`
-            - Windows (older PCs) ......... `starling-server-i686-pc-windows-gnu.exe`
-            - macOS (M1–M4) ............... `starling-server-aarch64-apple-darwin`
-            - macOS (Intel) ............... `starling-server-x86_64-apple-darwin`
-            - Linux (most) ............... `starling-server-x86_64-unknown-linux-gnu`
-            - Linux (portable/Alpine) .... `starling-server-x86_64-unknown-linux-musl`
-            - Linux (ARM64 / Pi 4+) ...... `starling-server-aarch64-unknown-linux-gnu`
-            - Linux (ARMv7 / Pi 2–3) ..... `starling-server-armv7-unknown-linux-gnueabihf`
-            - Linux (32-bit) ............. `starling-server-i686-unknown-linux-gnu`
+            **Windows (PowerShell):**
+            ```
+            irm https://forgejo.hearthhome.lol/Saltfault/Starling-Server/releases/download/v${{ needs.detect.outputs.version }}/install.ps1 | iex
+            ```
+
+            **Linux / macOS:**
+            ```
+            curl -sSfL https://forgejo.hearthhome.lol/Saltfault/Starling-Server/releases/download/v${{ needs.detect.outputs.version }}/install.sh | bash
+            ```
+
+            ## Manual download
+
+            | Platform | Binary |
+            |----------|--------|
+            | Windows (64-bit) | `starling-server-x86_64-pc-windows-msvc.exe` |
+            | Windows (32-bit) | `starling-server-i686-pc-windows-msvc.exe` |
+            | macOS (M1–M4) | `starling-server-aarch64-apple-darwin` |
+            | macOS (Intel) | `starling-server-x86_64-apple-darwin` |
+            | Linux (x64) | `starling-server-x86_64-unknown-linux-gnu` |
+            | Linux (musl) | `starling-server-x86_64-unknown-linux-musl` |
+            | Linux (ARM64) | `starling-server-aarch64-unknown-linux-gnu` |
+            | Linux (ARMv7) | `starling-server-armv7-unknown-linux-gnueabihf` |
+            | Linux (32-bit) | `starling-server-i686-unknown-linux-gnu` |
