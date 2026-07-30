@@ -250,7 +250,7 @@ pub async fn open(
     })?;
     let secret = iroh::SecretKey::from_bytes(&key_bytes);
 
-    let mut builder = Endpoint::builder(presets::default()).secret_key(secret);
+    let mut builder = Endpoint::builder(presets::Empty).secret_key(secret);
     // Allow a community to point its roost's endpoint at a self-hosted
     // iroh-relay (run beside the roost) without rebuilding. Relays only
     // forward ciphertext the E2E crypto has already sealed, so this drops
