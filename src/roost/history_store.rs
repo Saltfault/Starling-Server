@@ -1,4 +1,4 @@
-//! Durable sled adapter for Starling's validated V1 event history.
+//! Durable sled adapter for Starling's validated event history.
 
 use std::collections::HashMap;
 use std::sync::RwLock;
@@ -18,7 +18,7 @@ struct StoredHead {
     event_count: u64,
 }
 
-/// Durable V1 history storage. Membership is deliberately injected from the
+/// Durable history storage. Membership is deliberately injected from the
 /// runtime authority path and is never inferred from untrusted history data.
 #[derive(Debug)]
 pub struct HistoryStore {

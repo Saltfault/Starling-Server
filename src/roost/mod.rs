@@ -151,7 +151,7 @@ fn channel_id_from_name(name: &str) -> ChannelId {
 }
 
 /// Build a [`MembershipState`] from the current [`PermState`] and inject it
-/// into the history store so that History V1 requests can authorize callers
+/// into the history store so that history requests can authorize callers
 /// against the roost's live permission model.
 fn update_history_membership(
     history_store: &HistoryStore,
@@ -403,7 +403,7 @@ pub async fn open(
 
     let control_key = format!("{code}/_control");
     let control = topic_for(&format!("starling/roost/{control_key}"));
-    // Phase 9: the control channel (where RoostState — including the ban list
+    // The control channel (where RoostState — including the ban list
     // and member roster — is broadcast) is now encrypted with a high-entropy
     // secret minted by the store, not derivable from the public roost code.
     // A non-member who merely knows the invite code can no longer read the

@@ -1,4 +1,4 @@
-//! Bounded, authorized History V1 protocol handler.
+//! Bounded, authorized history protocol handler.
 
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
@@ -84,7 +84,7 @@ impl HistoryProto {
             );
         }
 
-        // Clone membership before any await. Missing V1 state and failed remote
+        // Clone membership before any await. Missing state and failed remote
         // authorization both deny access without revealing whether data exists.
         let membership = self.store.membership(&request.space)?;
         ensure!(

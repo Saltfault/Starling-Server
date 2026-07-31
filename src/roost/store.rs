@@ -32,7 +32,7 @@ impl Store {
 
     /// Load (or mint and persist) the 32-byte secret key for a roost channel.
     ///
-    /// Unlike the legacy V0 scheme where channel keys were derived from the
+    /// Unlike the legacy scheme where channel keys were derived from the
     /// public roost code, these secrets are random and stored in sled, so they
     /// cannot be derived by anyone who merely knows the code. The roost hands
     /// them out only to admitted birds via the join handshake.
