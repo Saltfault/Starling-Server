@@ -1544,6 +1544,12 @@ fn compute_verdict(
         ModRequest::DeleteMessage { channel, id } => delete_verdict(st, from, store, &channel, &id),
         ModRequest::AddChannel(name) => add_channel_verdict(st, from, &name),
         ModRequest::RemoveChannel(name) => remove_channel_verdict(st, from, &name),
+        ModRequest::SetRole { target, role_index } => {
+            once(st.perms.handle_set_role(from, &target, role_index))
+        }
+        ModRequest::TransferOwnership(target) => {
+            once(st.perms.handle_transfer_ownership(from, &target))
+        }
     }
 }
 
