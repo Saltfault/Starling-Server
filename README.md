@@ -1,12 +1,12 @@
-# Starling Server
+# Starling Server — DEPRECATED
 
-The **roost** server binary for **[Starling](https://forgejo.hearthhome.lol/Saltfault/Starling)** — a federated, peer-to-peer communications platform.
-
-The shared protocol library (networking, crypto, types) was extracted to the [`starling`](https://forgejo.hearthhome.lol/Saltfault/Starling) crate, which both this server and the TUI depend on.
-
-> ⚠️ **Early access — under active development.** Roost lifecycle (create/open/destroy) and history persistence work today. Membership and channel management are landing with roles (see the roadmap). Expect rough edges and breaking changes; bug reports and feedback are welcome.
-
----
+> **⚠️ This crate is deprecated.** All roost server functionality has been moved to the
+> [`starling`](https://forgejo.hearthhome.lol/Saltfault/Starling) core crate (v0.6.0+).
+> Use `starling::roost::server` for background roost operations and
+> `starling::roost::store` for message persistence.
+>
+> This binary remains available for backward compatibility but will not receive new features.
+> New development should use the `starling` launcher: `starling roost create <name>`.
 
 # For operators — running a roost
 
